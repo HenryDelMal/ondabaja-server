@@ -4,9 +4,11 @@ import json
 import socket
 import tempfile
 import threading
+import time
 import unittest
 
 from encodec_live_streamer.config import Config
+from encodec_live_streamer.ecdc import make_test_ecdc
 from encodec_live_streamer.manifest import ManifestStore
 from encodec_live_streamer.mux import OndaBajaTcpServer, Radio
 from encodec_live_streamer.ondabaja import OndaBajaService, load_ondabaja_config
@@ -178,6 +180,53 @@ class StationFolderTests(unittest.TestCase):
         self.assertEqual(payload(clients[1], b'm'), stores[1].snapshot().manifest)
         clients[0].sendall(b'C' + encode_varint(7))
         self.assertEqual(exact(clients[0], 1), b'n')
+
+    def test_station_switch_preempts_pending_fetch_during_publication(self):
+        stores = [ManifestStore(Config(input='unused', codec='ECNG',
+                    output_dir=self.root / name, fsync=False)) for name in ('slow', 'live')]
+        radios = tuple(Radio(name, name.upper(), '', store)
+                       for name, store in zip(('slow', 'live'), stores))
+        server = OndaBajaTcpServer('127.0.0.1', 0, radios, 1, wait_seconds=1.0)
+        server.start()
+        self.addCleanup(server.close)
+        client = socket.create_connection(server.address, timeout=1)
+        self.addCleanup(client.close)
+        client.settimeout(1)
+        client.sendall(b'R\x04slow')
+        self.assertEqual(payload(client, b'm'), stores[0].snapshot().manifest)
+
+        # Leave the old station's request waiting, then make an old-station
+        # publication race the new station selection.
+        client.sendall(b'f\x00')
+        time.sleep(0.05)
+
+        def publish_old_station():
+            time.sleep(0.005)
+            store = stores[0]
+            sample_count = store.config.samples_per_segment
+            encoded = make_test_ecdc(sample_count, store.config.codebooks,
+                                     store.config.model)
+            store.publish_segment(
+                encoded, sample_count=sample_count, pts_samples=0,
+                program_date_time='2026-01-01T00:00:00Z', epoch='old-station',
+                discontinuity=True,
+            )
+
+        publisher = threading.Thread(target=publish_old_station)
+        publisher.start()
+        switch_started = time.monotonic()
+        client.sendall(b'R\x04live')
+        self.assertEqual(payload(client, b'm'), stores[1].snapshot().manifest)
+        self.assertLess(time.monotonic() - switch_started, 0.5)
+        publisher.join(timeout=1)
+        self.assertFalse(publisher.is_alive())
+
+        # No stale S/n response from the interrupted fetch may be queued ahead
+        # of later commands on this still-open connection.
+        client.sendall(b'M')
+        self.assertEqual(payload(client, b'm'), stores[1].snapshot().manifest)
+        client.sendall(b'H')
+        self.assertEqual(exact(client, 1), b'h')
 
     def test_async_listener_handles_many_idle_connections_on_one_thread(self):
         store = ManifestStore(Config(input='unused', codec='ECNG',

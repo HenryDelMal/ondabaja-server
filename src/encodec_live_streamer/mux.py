@@ -208,9 +208,57 @@ class OndaBajaTcpServer:
         incoming_deadline = loop.time() + self.idle_timeout
         publication = None
         catalog_notification = None
+
+        async def handle_interrupt(command: bytes):
+            nonlocal incoming, incoming_deadline
+            if not command:
+                return "close", None
+            if command == b"H":
+                await _write(writer, b"h")
+                incoming = asyncio.create_task(reader.read(1))
+                incoming_deadline = loop.time() + self.idle_timeout
+                return "continue", None
+            if command == b"R":
+                size = await _read_varint(reader, self.idle_timeout)
+                if size > MAX_STATION_ID_BYTES:
+                    raise ValueError("station ID exceeds protocol limit")
+                raw_id = await self._read_exactly(reader, size)
+                return "selected", await self._select_radio(writer, raw_id)
+            if command in (b"Q", b"q"):
+                return "close", None
+            raise ValueError("only R, H, or Q may interrupt a pending f request")
+
+        async def handle_ready_interrupt():
+            # Let the socket reader run once before committing a segment or
+            # timeout response. If R arrived in the same wake-up window, it
+            # must win so the old fetch cannot consume its command byte.
+            await asyncio.sleep(0)
+            if incoming is None or not incoming.done():
+                return None, None
+            command = incoming.result()
+            return await handle_interrupt(command)
+
         try:
             while not self._stopping.is_set():
+                if incoming.done():
+                    action, selected = await handle_interrupt(incoming.result())
+                    if action == "continue":
+                        continue
+                    if action == "selected":
+                        return selected, None, False
+                    return None, None, True
                 if catalog_changed.is_set():
+                    action, selected = await handle_ready_interrupt()
+                    if action == "continue":
+                        continue
+                    if action == "selected":
+                        return selected, None, False
+                    if action == "close":
+                        return None, None, True
+                    if incoming is not None and not incoming.done():
+                        incoming.cancel()
+                        await asyncio.gather(incoming, return_exceptions=True)
+                        incoming = None
                     catalog_changed.clear()
                     await _write(writer, b"u")
                     return _CATALOG_RELOADED, None, False
@@ -222,6 +270,20 @@ class OndaBajaTcpServer:
                         await _write(writer, b"g")
                         return None, None, None
                     frame = await _segment_frame(radio.store, item)
+                    action, selected = await handle_ready_interrupt()
+                    if action == "continue":
+                        continue
+                    if action == "selected":
+                        return selected, None, False
+                    if action == "close":
+                        return None, None, True
+                    if incoming is not None and not incoming.done():
+                        # Stop the speculative read before replying. Bytes
+                        # arriving after this point remain buffered for the
+                        # next command loop instead of being lost here.
+                        incoming.cancel()
+                        await asyncio.gather(incoming, return_exceptions=True)
+                        incoming = None
                     await _write(writer, frame if frame is not None else b"g")
                     return None, frame, False
 
@@ -244,25 +306,24 @@ class OndaBajaTcpServer:
                     catalog_notification.cancel()
                     await asyncio.gather(catalog_notification, return_exceptions=True)
                     catalog_notification = None
-                    command = incoming.result()
-                    if not command:
-                        return None, None, True
-                    if command == b"H":
-                        await _write(writer, b"h")
-                        incoming = asyncio.create_task(reader.read(1))
-                        incoming_deadline = loop.time() + self.idle_timeout
+                    action, selected = await handle_interrupt(incoming.result())
+                    if action == "continue":
                         continue
-                    if command == b"R":
-                        size = await _read_varint(reader, self.idle_timeout)
-                        if size > MAX_STATION_ID_BYTES:
-                            raise ValueError("station ID exceeds protocol limit")
-                        raw_id = await self._read_exactly(reader, size)
-                        selected = await self._select_radio(writer, raw_id)
+                    if action == "selected":
                         return selected, None, False
-                    if command in (b"Q", b"q"):
-                        return None, None, True
-                    raise ValueError("only R, H, or Q may interrupt a pending f request")
+                    return None, None, True
                 if catalog_notification in done:
+                    action, selected = await handle_ready_interrupt()
+                    if action == "continue":
+                        continue
+                    if action == "selected":
+                        return selected, None, False
+                    if action == "close":
+                        return None, None, True
+                    if incoming is not None and not incoming.done():
+                        incoming.cancel()
+                        await asyncio.gather(incoming, return_exceptions=True)
+                        incoming = None
                     catalog_notification = None
                     catalog_changed.clear()
                     await _write(writer, b"u")
@@ -271,6 +332,17 @@ class OndaBajaTcpServer:
                     publication = None
                     continue
                 if loop.time() >= deadline:
+                    action, selected = await handle_ready_interrupt()
+                    if action == "continue":
+                        continue
+                    if action == "selected":
+                        return selected, None, False
+                    if action == "close":
+                        return None, None, True
+                    if incoming is not None and not incoming.done():
+                        incoming.cancel()
+                        await asyncio.gather(incoming, return_exceptions=True)
+                        incoming = None
                     await _write(writer, b"n")
                     return None, None, False
                 raise asyncio.TimeoutError
@@ -283,9 +355,10 @@ class OndaBajaTcpServer:
             if catalog_notification is not None and not catalog_notification.done():
                 catalog_notification.cancel()
                 await asyncio.gather(catalog_notification, return_exceptions=True)
-            if not incoming.done():
+            if incoming is not None and not incoming.done():
                 incoming.cancel()
-            await asyncio.gather(incoming, return_exceptions=True)
+            if incoming is not None:
+                await asyncio.gather(incoming, return_exceptions=True)
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter) -> None:
