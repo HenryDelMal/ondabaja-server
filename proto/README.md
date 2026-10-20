@@ -32,7 +32,8 @@ sequence, retry state, and queued PCM before restarting from the new manifest.
 
 The request stream has one active station and one outstanding fetch per
 connection. The client must not send concurrent `f` requests. Catalog revision
-is monotonic and persisted in `.ondabaja-revision.json`; catalog changes include
+is monotonic and persisted in `<output_root>/.ondabaja-revision.json` by default;
+an explicit `server.revision_file` can override this. Catalog changes include
 ID/title/order/URL changes and edits to a station stream configuration. The UTC
 millisecond field is informational. IDs should remain unchanged when only the
 display title or configuration changes.
@@ -44,3 +45,10 @@ as the prototype name field. ECNG segments retain the ELTCP S framing.
 The mux listener is plain TCP with no authentication or encryption. Expose it
 only on a trusted network or tunnel. Station HTTP manifests and segments remain
 available for older clients and as fallback.
+
+HTTP publication uses the shared `server.output_root`: `catalog.pb` is the raw
+StationCatalog protobuf payload (without the TCP `c` tag or length prefix),
+and `catalog.json` is a readable equivalent. Their revision, timestamp and
+station metadata match the TCP catalog for that service run. Per-station files
+live under `<id>/`. An optional `server.public_base_url` derives each catalog
+entry's `manifest_url`; station metadata can override it explicitly.

@@ -12,10 +12,11 @@ try:
 except ImportError:
     import tomli as tomllib
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .config import Config
 from .mux import OndaBajaTcpServer, Radio
+from .manifest import atomic_write
 from .service import LiveService
 
 LOG = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class OndaBajaConfig:
     revision_file: pathlib.Path
     stations: tuple[StationConfig, ...]
     revision: int
+    output_root: pathlib.Path
 
 
 def _revision(path: pathlib.Path, stations: tuple[StationConfig, ...], defaults: dict | None = None) -> int:
@@ -96,6 +98,11 @@ def load_ondabaja_config(path: str | pathlib.Path) -> tuple[OndaBajaConfig, tupl
     if "output_dir" in defaults:
         raise ValueError("use server.output_root instead of stream_defaults.output_dir")
     output_root = (source.parent / server.get("output_root", "public")).resolve()
+    public_base_url = str(server.get("public_base_url", "")).strip().rstrip("/")
+    parsed_base = urlsplit(public_base_url)
+    if public_base_url and (parsed_base.scheme not in {"http", "https"}
+                            or not parsed_base.netloc or parsed_base.query or parsed_base.fragment):
+        raise ValueError("server.public_base_url must be an HTTP(S) directory URL without query or fragment")
     if "stations_dir" in server:
         if "stations" in raw:
             raise ValueError("use server.stations_dir or [[stations]], not both")
@@ -123,6 +130,8 @@ def load_ondabaja_config(path: str | pathlib.Path) -> tuple[OndaBajaConfig, tupl
         station_id = str(row.get("id", "")).strip()
         title = str(row.get("title", row.get("name", ""))).strip()
         manifest_url = str(row.get("manifest_url", "")).strip()
+        if not manifest_url and public_base_url:
+            manifest_url = f"{public_base_url}/{quote(station_id, safe='')}/stream.json"
         config_name = str(row.get("stream_config", "")).strip()
         if not station_id or len(station_id.encode("utf-8")) > 128:
             raise ValueError("station id must be 1..128 UTF-8 bytes")
@@ -174,11 +183,11 @@ def load_ondabaja_config(path: str | pathlib.Path) -> tuple[OndaBajaConfig, tupl
         raise ValueError("server.port or server.max_clients is out of range")
     if idle_timeout <= fetch_wait or fetch_wait <= 0:
         raise ValueError("server.idle_timeout must exceed positive server.fetch_wait")
-    revision_file = (source.parent / str(server.get("revision_file", ".ondabaja-revision.json"))).resolve()
+    revision_file = (source.parent / str(server.get("revision_file", output_root / ".ondabaja-revision.json"))).resolve()
     station_tuple = tuple(stations)
     config = OndaBajaConfig(host, port, max_clients, idle_timeout, fetch_wait,
                             max_streams, revision_file, station_tuple,
-                            _revision(revision_file, station_tuple, defaults))
+                            _revision(revision_file, station_tuple, defaults), output_root)
     return config, tuple(streams)
 
 
@@ -214,6 +223,7 @@ class OndaBajaService:
                 self.stop()
 
         try:
+            self.publish_catalog()
             self.threads = [threading.Thread(target=run_station,
                               args=(station.id, service), name=f"radio-{station.id}", daemon=True)
                             for station, service in zip(self.config.stations, self.services)]
@@ -232,3 +242,16 @@ class OndaBajaService:
                 thread.join(timeout=10)
         if self.errors:
             raise RuntimeError(f"station publisher stopped after error: {self.errors[0]}")
+
+    def publish_catalog(self) -> None:
+        """Publish the same directory over HTTP as the shared TCP listener."""
+        document = {
+            "revision": self.config.revision,
+            "updated_at_unix_ms": self.tcp.catalog_updated_at_unix_ms,
+            "stations": [dict(id=station.id, title=station.title,
+                              manifest_url=station.manifest_url)
+                         for station in self.config.stations],
+        }
+        atomic_write(self.config.output_root / "catalog.pb", self.tcp.catalog)
+        atomic_write(self.config.output_root / "catalog.json",
+                     (json.dumps(document, ensure_ascii=False) + "\n").encode("utf-8"))

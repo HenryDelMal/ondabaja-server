@@ -11,7 +11,7 @@ The project is experimental. It supports Meta EnCodec and the jointly trained
 ECNG profile (24 kHz mono, two or four codebooks at 1.5 or 3 kbps). ECNG uses
 the checkpoint-specific FP32 encoder in `models/ecng-24khz-encoder-f32.bin`;
 the OndaBaja Android APK carries its matching INT8 decoder. The export
-provenance is recorded in `training/vast_joint/ecng-export.json`. EnCodec is
+provenance is recorded in `models/manifest.json`. EnCodec is
 Meta's research codec; this service
 uses the [official Meta EnCodec repository](https://github.com/facebookresearch/encodec)
 for model/checkpoint provenance and the MIT-licensed native implementation in
@@ -32,8 +32,8 @@ this repository's upstream publisher.
 ## Configuration
 
 Install Linux build dependencies (`build-essential`, `cmake`, `ffmpeg`, `git`,
-`python3`, and `python3-venv`), build the native encoder, and prepare the
-combined model files using the included scripts:
+`python3`, and `python3-venv`), then install the service and build its native
+encoder from the EnCodec Live Streamer base:
 
 ```sh
 python3 -m venv .venv
@@ -41,11 +41,10 @@ python3 -m venv .venv
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
 ./scripts/build-native.sh
-MODEL_DIR="$PWD/models" NATIVE_ENCODER="$PWD/bin/encodec-live-native" \
-  ./scripts/prepare-models.sh
 ```
 
-`prepare-models.sh` also installs the bundled ECNG encoder model. Use
+Copy your current ECNG encoder into `models/ecng-24khz-encoder-f32.bin`.
+Model weights are intentionally excluded from GitHub. Use
 `codec = "ECNG"` in a stream TOML for ECNG; its only valid settings are
 `samplerate = 24` and `bandwidth_kbps = 1.5` or `3`. Use `codec = "EnCodec"`
 for the original Meta models and bitrate profiles.
@@ -58,6 +57,7 @@ host = "0.0.0.0"
 port = 9010
 stations_dir = "config/stations"
 output_root = "public"
+public_base_url = ""  # Optional HTTP directory URL, configured privately.
 max_clients = 32
 max_streams = 2
 
@@ -107,7 +107,17 @@ files and restart to rebuild the catalog and update its persisted revision.
 Live configuration reload is not implemented. Set `max_streams` to a count
 of simultaneous encoders the host can sustain.
 
-Each station's `manifest_url` must point to the HTTP directory served by nginx.
+`server.output_root` is the shared publication directory. By default each
+station writes into `<output_root>/<id>/`; omit station `output_dir` overrides
+to use this layout. The server publishes `catalog.pb` and `catalog.json` at
+the root when it starts. Both contain the same revision, UTC timestamp and
+station metadata as the TCP catalog. Per-station `stream.json`, `stream.pb`,
+and rolling segments live in each station directory. Revision state defaults
+to `<output_root>/.ondabaja-revision.json` and must persist across restarts.
+
+Set `server.public_base_url` to the HTTP directory URL mapped to `output_root`.
+The server derives `<public_base_url>/<id>/stream.json` for each station's
+catalog entry. An explicit station `manifest_url` overrides that URL.
 HTTP publication continues independently for older clients and as a fallback.
 The separate mux TCP listener defaults to port 9010. It is plain, unencrypted
 TCP; expose it only on a trusted network or through a secure tunnel.
@@ -130,3 +140,5 @@ The server does not alter nginx, systemd, or an existing single-radio
 installation automatically. Use separate output paths and a distinct TCP port
 for the OndaBaja service. Adapt `deploy/ondabaja-server.service` to your output
 paths and install `deploy/ondabaja-nginx.conf` into your HTTPS site.
+See [Linux deployment instructions](docs/DEPLOYMENT.md) for installation,
+directory permissions, and private configuration.

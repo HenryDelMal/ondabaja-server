@@ -23,3 +23,7 @@ segment-*.ecdc
 /models/**/*.pth
 /models/**/*.safetensors
 /models/**/*.onnx
+
+# Private deployment settings and station inputs.
+/server.local.toml
+/config/stations.local/

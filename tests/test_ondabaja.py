@@ -1,4 +1,6 @@
 from pathlib import Path
+from dataclasses import replace
+import json
 import socket
 import tempfile
 import unittest
@@ -6,7 +8,7 @@ import unittest
 from encodec_live_streamer.config import Config
 from encodec_live_streamer.manifest import ManifestStore
 from encodec_live_streamer.mux import OndaBajaTcpServer, Radio
-from encodec_live_streamer.ondabaja import load_ondabaja_config
+from encodec_live_streamer.ondabaja import OndaBajaService, load_ondabaja_config
 from encodec_live_streamer.tcp import encode_varint, read_varint
 
 
@@ -76,6 +78,50 @@ class StationFolderTests(unittest.TestCase):
         self.station('a.toml', 'same', 'First')
         self.station('b.toml', 'same', 'Second')
         with self.assertRaisesRegex(ValueError, 'duplicate station id'):
+            self.load()
+
+    def test_http_directory_and_tcp_catalog_match(self):
+        (self.root / 'server.toml').write_text(
+            '[server]\nstations_dir="stations"\noutput_root="published"\n'
+            'public_base_url="https://radio.example.com/radios/"\n')
+        (self.root / 'stations/a.toml').write_text(
+            '[station]\nid="radio a"\ntitle="A"\n[stream]\ninput="unused"\n')
+        config, streams = self.load()
+        self.assertEqual(streams[0].output_dir, (self.root / 'published/radio a').resolve())
+        self.assertEqual(config.stations[0].manifest_url,
+                         'https://radio.example.com/radios/radio%20a/stream.json')
+        self.assertEqual(config.revision_file.parent, config.output_root)
+        service = OndaBajaService(replace(config, port=0), streams)
+        self.addCleanup(service.tcp.close)
+        service.publish_catalog()
+        self.assertTrue(streams[0].output_dir.is_dir())
+        self.assertEqual((config.output_root / 'catalog.pb').read_bytes(), service.tcp.catalog)
+        document = json.loads((config.output_root / 'catalog.json').read_text())
+        self.assertEqual(document['revision'], config.revision)
+        self.assertEqual(document['updated_at_unix_ms'], service.tcp.catalog_updated_at_unix_ms)
+        self.assertEqual(document['stations'][0]['manifest_url'], config.stations[0].manifest_url)
+        service.tcp.start()
+        client = socket.create_connection(service.tcp.address, timeout=2)
+        self.addCleanup(client.close)
+        client.sendall(b'C\x00')
+        self.assertEqual(payload(client, b'c'), (config.output_root / 'catalog.pb').read_bytes())
+
+    def test_http_base_validation_and_station_override(self):
+        path = self.station('a.toml', 'a', 'A')
+        path.write_text(path.read_text().replace('[station]',
+            '[station]\nmanifest_url="https://fallback.example.com/a/stream.json"'))
+        (self.root / 'server.toml').write_text(
+            '[server]\nstations_dir="stations"\npublic_base_url="https://radio.example.com/radios"\n')
+        config, _ = self.load()
+        self.assertEqual(config.stations[0].manifest_url,
+                         'https://fallback.example.com/a/stream.json')
+        original_revision = config.revision
+        path.write_text(path.read_text().replace(
+            'manifest_url="https://fallback.example.com/a/stream.json"\n', ''))
+        self.assertGreater(self.load()[0].revision, original_revision)
+        config_path = self.root / 'server.toml'
+        config_path.write_text(config_path.read_text().replace('/radios"', '/radios?token=private"'))
+        with self.assertRaisesRegex(ValueError, 'public_base_url'):
             self.load()
 
     def test_explicit_encodec_rejected(self):

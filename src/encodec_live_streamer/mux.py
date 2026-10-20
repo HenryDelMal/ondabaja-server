@@ -201,6 +201,7 @@ class _MuxSocketServer(socketserver.ThreadingTCPServer):
         self.radios_by_id = {radio.id: radio for radio in radios}
         self.revision = revision
         updated_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        self.catalog_updated_at_unix_ms = updated_ms
         self.catalog = _catalog_bytes(revision, updated_ms, tuple(radios))
         self.idle_timeout = idle_timeout
         self.wait_seconds = wait_seconds
@@ -258,6 +259,14 @@ class OndaBajaTcpServer:
         self._server = _MuxSocketServer((host, port), radios, revision, idle_timeout,
                                         wait_seconds, max_clients)
         self._thread: threading.Thread | None = None
+
+    @property
+    def catalog(self) -> bytes:
+        return self._server.catalog
+
+    @property
+    def catalog_updated_at_unix_ms(self) -> int:
+        return self._server.catalog_updated_at_unix_ms
 
     @property
     def address(self):
