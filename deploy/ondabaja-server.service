@@ -1,0 +1,28 @@
+[Unit]
+Description=Experimental OndaBaja multi-radio EnCodec publisher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ondabaja
+Group=ondabaja
+WorkingDirectory=/opt/ondabaja-server
+Environment=HOME=/opt/ondabaja-server
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Adapt these writable paths to each station's output_dir and revision_file.
+ReadWritePaths=/opt/ondabaja-server/.ondabaja-revision.json /opt/ondabaja-server/public
+ExecStart=/opt/ondabaja-server/.venv/bin/ondabaja-server serve --config /opt/ondabaja-server/server.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

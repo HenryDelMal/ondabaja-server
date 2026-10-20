@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ondabaja.server.v1;
+
+message StationCatalog {
+  // Monotonic content revision, incremented for any catalog-visible change.
+  uint64 revision = 1;
+  // Informational UTC Unix milliseconds. Revision is the change detector.
+  uint64 updated_at_unix_ms = 2;
+  repeated Station stations = 3;
+}
+
+message Station {
+  // Stable identifier used by the R station-selection request.
+  string id = 1;
+  string title = 2; // Wire-compatible with the prototype name field.
+  // HTTP fallback manifest URL (normally stream.json).
+  string manifest_url = 3;
+}

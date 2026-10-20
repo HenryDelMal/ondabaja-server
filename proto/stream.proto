@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package encodec.live.v2;
+
+// Compact protobuf manifest. Codec/container metadata is read from ECDC files.
+message StreamManifest {
+  uint32 schema_version = 1; // 2
+  uint64 media_sequence = 2;
+  uint32 segment_duration_samples = 3; // Same for every listed segment.
+  reserved 4;
+  reserved "title";
+  repeated EpochGroup epochs = 5;
+}
+
+// Groups consecutive segments from one FFmpeg/encoder timeline.
+message EpochGroup {
+  // Numeric epoch identifier: Unix milliseconds when this epoch began.
+  uint64 epoch_start_unix_ms = 1;
+  // Applies to the first segment in this group; later entries are continuous.
+  bool first_segment_discontinuity = 2;
+  repeated Segment segments = 3;
+}
+
+message Segment {
+  uint32 byte_length = 1;
+  // CRC-32C (Castagnoli) of the complete ECDC file.
+  fixed32 crc32c = 2;
+}

@@ -1,0 +1,29 @@
+[Unit]
+Description=Experimental live EnCodec publisher
+Documentation=https://github.com/HenryDelMal/encodec-live-streamer file:/opt/encodec-live-streamer/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=encodec-live
+Group=encodec-live
+WorkingDirectory=/opt/encodec-live-streamer
+Environment=HOME=/opt/encodec-live-streamer
+Environment=XDG_CACHE_HOME=/opt/encodec-live-streamer/.cache
+Environment=PYTHONDONTWRITEBYTECODE=1
+ReadWritePaths=/opt/encodec-live-streamer/.cache /opt/encodec-live/public
+ExecStart=/opt/encodec-live-streamer/.venv/bin/encodec-live serve --config /etc/encodec-live.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

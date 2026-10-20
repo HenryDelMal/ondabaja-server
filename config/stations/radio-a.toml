@@ -1,0 +1,10 @@
+[station]
+id = "radio-a"
+title = "Radio A"
+# Optional HTTP fallback URL:
+# manifest_url = "https://radio.example.com/radios/radio-a/stream.json"
+
+[stream]
+input = "https://radio.example.com/radio-a/live.mp3"
+# Encoding settings inherit [stream_defaults] from the root server.toml.
+# Output defaults to server.output_root/<station id>.

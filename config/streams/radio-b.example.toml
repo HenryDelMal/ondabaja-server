@@ -1,0 +1,61 @@
+[stream]
+# Any URL/path/device FFmpeg accepts. Input-specific options go before -i.
+input = "https://radio.example/live.mp3"
+output_dir = "/opt/ondabaja/radio-b"
+
+# Examples:
+# ALSA: input = "hw:0" and input_format = "alsa"
+# Realtime looping file: input_options = ["-re", "-stream_loop", "-1"]
+# SRT listener: input = "srt://0.0.0.0:9000?mode=listener"
+input_options = []
+# input_format = "alsa"
+
+ffmpeg = "/usr/bin/ffmpeg"
+# C++ encoder executable and combined encoder/decoder model directory.
+native_encoder = "/opt/encodec-live-streamer/bin/encodec-live-native"
+model_dir = "/opt/encodec-live/models"
+
+# OndaBaja uses the 24 kHz mono Vocos decoder.
+samplerate = 24
+bandwidth_kbps = 3
+# 149 frames at 75 Hz is 1.986667 s, close to 2 s and frame-aligned at 24 kHz.
+segment_duration = 1.9866666666666666
+window_segments = 16
+# Keep this many additional old files on disk to protect clients that fetched a
+# manifest immediately before it rolled forward.
+stale_grace_segments = 6
+# Native Eigen/OpenMP CPU threads. Start with 1 on a small server and benchmark.
+# Values above 1 require a build where CMake found OpenMP.
+threads = 1
+# RVQ search width: 1 is the fastest greedy encoder; larger values may improve
+# code selection at substantial CPU cost. Upstream defaults to 8.
+beam_size = 8
+# Restart FFmpeg after EOF or an input failure and mark the next segment as a
+# discontinuity. Set false for a finite file that should end normally.
+restart_ffmpeg = true
+restart_delay = 2.0
+manifest_name = "stream.json"
+# Disable only for disposable/test output when lower durability is acceptable.
+fsync = true
+
+# Optional persistent ELTCP v1 transport, alongside the HTTP files above.
+# To accept remote clients, set tcp_host = "0.0.0.0" (IPv4) or "::" (IPv6)
+# and allow tcp_port through the host firewall. Plain TCP has no TLS/authentication.
+tcp_enabled = false
+tcp_host = "127.0.0.1"
+tcp_port = 9001
+tcp_max_clients = 32
+tcp_idle_timeout = 60.0
+# A manifest request waits up to this many seconds for a new publication.
+# Keep it below tcp_idle_timeout; the client read timeout must exceed this.
+tcp_manifest_wait = 15.0
+# Only enable after the client supports the one-byte 'h' response while waiting
+# for a manifest. It is disabled by default for older-client compatibility.
+tcp_heartbeat_enabled = false
+tcp_heartbeat_interval = 3.5
+# Extra sends of the most recently fetched segment after a client CRC error.
+tcp_max_retries = 2
+# Optional asynchronous timing logs (monotonic durations and UTC correlation).
+tcp_diagnostics = false
+# Combined cached S/s frame bytes; 0 disables caching. Also limited to window + grace.
+tcp_segment_cache_bytes = 8388608

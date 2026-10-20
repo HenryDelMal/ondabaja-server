@@ -1,0 +1,31 @@
+{
+  "training_step": 100000,
+  "source_checkpoint": "/Users/henry/Documents/ChatGPT/EnCodec/training/vast_joint/checkpoints/radio24-v2-finetune-v1/latest.pt",
+  "artifacts": {
+    "ecng-24khz-encoder-f32.bin": {
+      "bytes": 31791080,
+      "sha256": "cb3b155ce06fc90f7e44de3451dce229b927530d29b023d73e5be21f448dfb63"
+    },
+    "ecng-24khz-decoder-int8.bin": {
+      "bytes": 10049239,
+      "sha256": "bd3b9b2a9105ddaf46fc592a4733b91b8859fba84360d330b673780390a23549"
+    },
+    "ecng-24khz-joint-state.pt": {
+      "bytes": 65856437,
+      "sha256": "cf393c911ff5c12924779adbf048b27e2c641d1b042eff1a4bc60588a5712a2d"
+    },
+    "ecng-24khz-decoder-fp32.bin": {
+      "bytes": 33981819,
+      "sha256": "81694ff2f7c219fd417de8730b15158121c38b91b46ab4b5bff4a94d9e9c3260"
+    },
+    "ecng-24khz-decoder-fp16.bin": {
+      "bytes": 16992703,
+      "sha256": "77c56a4e2f7b3b7b2eacbc6cfc4c3286726d387444ed21972e7190cde5355918"
+    },
+    "ecng-24khz-decoder-int4.bin": {
+      "bytes": 6081367,
+      "sha256": "b877537e52cb0145c3e28fb6406d5b8dd33481155b3acc0eef87e4b3f9c9dd0f",
+      "derived_from": "ecng-24khz-decoder-fp32.bin using export_ecng.py int4 groupwise symmetric quantization"
+    }
+  }
+}

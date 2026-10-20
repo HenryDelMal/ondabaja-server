@@ -1,0 +1,25 @@
+.venv/
+.cache/
+.DS_Store
+__pycache__/
+*.py[cod]
+.ondabaja-revision.json
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+bin/
+public/
+work/
+outputs/
+encodec-live.toml
+stream.json
+segment-*.ecdc
+
+/models/archive/
+# Keep encoder/model weights local until they are ready to publish.
+/models/**/*.bin
+/models/**/*.pt
+/models/**/*.pth
+/models/**/*.safetensors
+/models/**/*.onnx

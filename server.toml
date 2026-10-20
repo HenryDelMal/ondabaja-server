@@ -1,0 +1,25 @@
+# Global settings. Relative paths resolve against this file.
+[server]
+host = "0.0.0.0"
+port = 9010
+stations_dir = "config/stations"
+output_root = "public"
+revision_file = ".ondabaja-revision.json"
+max_clients = 32
+max_streams = 2
+idle_timeout = 60.0
+fetch_wait = 15.0
+
+# Shared station defaults. Individual [stream] tables may override these.
+[stream_defaults]
+codec = "ECNG"
+model_dir = "models"
+native_encoder = "bin/encodec-live-native"
+ffmpeg = "ffmpeg"
+samplerate = 24
+bandwidth_kbps = 3
+segment_duration = 1.9866666666666666
+threads = 1
+window_segments = 16
+stale_grace_segments = 6
+restart_ffmpeg = true

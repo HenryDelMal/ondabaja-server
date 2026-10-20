@@ -1,0 +1,13 @@
+[server]
+host = "0.0.0.0"
+port = 9010
+max_clients = 32
+idle_timeout = 60.0
+fetch_wait = 15.0
+# Every listed station runs its own FFmpeg input and ECNG publisher. Set this
+# guard to the largest number of simultaneous encoders this host can sustain.
+max_streams = 2
+revision_file = ".ondabaja-revision.json"
+
+# Loaded in filename order; each file contains [station] and [stream].
+stations_dir = "stations"
