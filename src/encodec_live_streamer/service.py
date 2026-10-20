@@ -25,7 +25,8 @@ class Encoder(Protocol):
 
 
 class LiveService:
-    def __init__(self, config: Config, encoder: Encoder | None = None) -> None:
+    def __init__(self, config: Config, encoder: Encoder | None = None, *,
+                 segment_cache_enabled: bool | None = None) -> None:
         self.config = config.validate()
         if not self.config.segment_is_aligned:
             LOG.warning(
@@ -35,7 +36,7 @@ class LiveService:
                 self.config.alignment_description,
             )
         self.encoder = encoder
-        self.store = ManifestStore(config)
+        self.store = ManifestStore(config, segment_cache_enabled=segment_cache_enabled)
         self.stopping = threading.Event()
         self._input: FfmpegInput | None = None
 

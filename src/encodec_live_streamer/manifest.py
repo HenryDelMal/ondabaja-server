@@ -158,8 +158,9 @@ def atomic_write(path: pathlib.Path, payload: bytes, fsync: bool = True) -> None
 
 
 class ManifestStore:
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, segment_cache_enabled: bool | None = None) -> None:
         self.config = config
+        self.segment_cache_enabled = config.tcp_enabled if segment_cache_enabled is None else segment_cache_enabled
         self.output_dir = config.output_dir
         self.path = self.output_dir / config.manifest_name
         self.protobuf_path = self.path.with_suffix(".pb")
@@ -181,6 +182,7 @@ class ManifestStore:
             if len(payload) == item["byte_length"]:
                 self._cache_segment(item, payload)
         self._publication_changed = threading.Condition()
+        self._publication_listeners = set()
         self._snapshot = self._make_snapshot()
 
     @property
@@ -365,7 +367,7 @@ class ManifestStore:
         )
 
     def _cache_segment(self, item: dict[str, Any], payload: bytes) -> None:
-        if not self.config.tcp_enabled or not self.config.tcp_segment_cache_bytes:
+        if not self.segment_cache_enabled or not self.config.tcp_segment_cache_bytes:
             return
         length = _protobuf_varint(len(payload))
         cost = 2 * (1 + len(length) + len(payload)) + 5
@@ -401,6 +403,15 @@ class ManifestStore:
             )
             return self._snapshot
 
+    def subscribe_publication(self, callback) -> None:
+        """Register a lightweight callback invoked after a manifest publish."""
+        with self._publication_changed:
+            self._publication_listeners.add(callback)
+
+    def unsubscribe_publication(self, callback) -> None:
+        with self._publication_changed:
+            self._publication_listeners.discard(callback)
+
     def wake_snapshot_waiters(self) -> None:
         with self._publication_changed:
             self._publication_changed.notify_all()
@@ -416,7 +427,14 @@ class ManifestStore:
         snapshot = self._make_snapshot(encoded_protobuf)
         with self._publication_changed:
             self._snapshot = snapshot
+            listeners = tuple(self._publication_listeners)
             self._publication_changed.notify_all()
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:
+                # A disconnected async listener must not stop media publishing.
+                continue
 
     def cleanup(self) -> None:
         if not self.segments:

@@ -27,7 +27,7 @@ class StationConfig:
     id: str
     title: str
     manifest_url: str
-    stream_config: pathlib.Path
+    config_path: pathlib.Path
 
 
 @dataclass(frozen=True)
@@ -54,7 +54,7 @@ def _revision(path: pathlib.Path, stations: tuple[StationConfig, ...], defaults:
         fingerprint.update(b"\0")
         fingerprint.update(station.manifest_url.encode())
         fingerprint.update(b"\0")
-        fingerprint.update(station.stream_config.read_bytes())
+        fingerprint.update(station.config_path.read_bytes())
         fingerprint.update(b"\0")
     digest = fingerprint.hexdigest()
     try:
@@ -103,25 +103,22 @@ def load_ondabaja_config(path: str | pathlib.Path) -> tuple[OndaBajaConfig, tupl
     if public_base_url and (parsed_base.scheme not in {"http", "https"}
                             or not parsed_base.netloc or parsed_base.query or parsed_base.fragment):
         raise ValueError("server.public_base_url must be an HTTP(S) directory URL without query or fragment")
-    if "stations_dir" in server:
-        if "stations" in raw:
-            raise ValueError("use server.stations_dir or [[stations]], not both")
-        directory = (source.parent / server["stations_dir"]).resolve()
-        if not directory.is_dir():
-            raise ValueError(f"station directory does not exist: {directory}")
-        station_rows = []
-        for station_path in sorted(directory.glob("*.toml")):
-            with station_path.open("rb") as handle:
-                station_document = tomllib.load(handle)
-            metadata = station_document.get("station")
-            if not isinstance(metadata, dict):
-                raise ValueError(f"{station_path}: requires a [station] table")
-            station_rows.append(dict(metadata, stream_config=str(station_path)))
-    else:
-        # Backward compatibility for the first prototype configuration.
-        station_rows = raw.get("stations", [])
-    if not isinstance(station_rows, list) or not station_rows:
-        raise ValueError("OndaBaja config requires at least one station TOML file or [[stations]] entry")
+    if "stations" in raw:
+        raise ValueError("put station configuration files in server.stations_dir")
+    directory = (source.parent / server.get("stations_dir", "config/stations")).resolve()
+    if not directory.is_dir():
+        raise ValueError(f"station directory does not exist: {directory}")
+    station_rows = []
+    for station_path in sorted(directory.glob("*.toml")):
+        with station_path.open("rb") as handle:
+            station_document = tomllib.load(handle)
+        metadata = station_document
+        if not isinstance(metadata, dict):
+            raise ValueError(f"{station_path}: station settings must be a flat TOML table")
+        station_rows.append(dict(metadata, id=metadata.get("id", station_path.stem),
+                                 config_path=str(station_path)))
+    if not station_rows:
+        raise ValueError("OndaBaja config requires at least one station TOML file")
     stations: list[StationConfig] = []
     streams: list[Config] = []
     seen: set[str] = set()
@@ -132,24 +129,25 @@ def load_ondabaja_config(path: str | pathlib.Path) -> tuple[OndaBajaConfig, tupl
         manifest_url = str(row.get("manifest_url", "")).strip()
         if not manifest_url and public_base_url:
             manifest_url = f"{public_base_url}/{quote(station_id, safe='')}/stream.json"
-        config_name = str(row.get("stream_config", "")).strip()
+        config_name = str(row.get("config_path", "")).strip()
         if not station_id or len(station_id.encode("utf-8")) > 128:
             raise ValueError("station id must be 1..128 UTF-8 bytes")
         if station_id in seen:
             raise ValueError(f"duplicate station id: {station_id}")
         if not title or not config_name:
-            raise ValueError(f"station {station_id!r} needs title and stream_config")
+            raise ValueError(f"station {station_id!r} needs title and a TOML file")
         parsed_url = urlsplit(manifest_url)
         if manifest_url and (parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc):
             raise ValueError(f"station {station_id!r}: manifest_url must be HTTP or HTTPS")
         seen.add(station_id)
-        config_path = (source.parent / config_name).resolve()
+        config_path = pathlib.Path(config_name).resolve()
         station = StationConfig(station_id, title, manifest_url, config_path)
         # IDs are used as directory names for automatically assigned outputs.
         if station_id in {".", ".."} or "/" in station_id or "\\" in station_id:
             raise ValueError(f"station {station_id!r}: ID must not contain path separators")
         station_defaults = dict(defaults, output_dir=str(output_root / station_id))
-        stream = Config.from_toml(config_path, default_codec="ECNG", defaults=station_defaults)
+        stream = Config.from_toml(config_path, default_codec="ECNG", defaults=station_defaults,
+                                  station_config=True)
         if stream.codec != "ECNG":
             raise ValueError(f"station {station_id!r}: OndaBaja stations require codec=ECNG")
         if stream.tcp_enabled:
@@ -176,10 +174,10 @@ def load_ondabaja_config(path: str | pathlib.Path) -> tuple[OndaBajaConfig, tupl
         raise ValueError(f"configured stations ({len(stations)}) exceed server.max_streams ({max_streams})")
     host = str(server.get("host", "0.0.0.0"))
     port = int(server.get("port", 9010))
-    max_clients = int(server.get("max_clients", 32))
+    max_clients = int(server.get("max_clients", 4096))
     idle_timeout = float(server.get("idle_timeout", 60.0))
     fetch_wait = float(server.get("fetch_wait", 15.0))
-    if not 1 <= port <= 65535 or not 1 <= max_clients <= 1024:
+    if not 1 <= port <= 65535 or not 1 <= max_clients <= 65536:
         raise ValueError("server.port or server.max_clients is out of range")
     if idle_timeout <= fetch_wait or fetch_wait <= 0:
         raise ValueError("server.idle_timeout must exceed positive server.fetch_wait")
@@ -196,7 +194,8 @@ class OndaBajaService:
 
     def __init__(self, config: OndaBajaConfig, stream_configs: tuple[Config, ...]):
         self.config = config
-        self.services = [LiveService(stream) for stream in stream_configs]
+        self.services = [LiveService(stream, segment_cache_enabled=True)
+                         for stream in stream_configs]
         radios = tuple(Radio(station.id, station.title, station.manifest_url, service.store)
                        for station, service in zip(config.stations, self.services))
         self.tcp = OndaBajaTcpServer(config.host, config.port, radios, config.revision,

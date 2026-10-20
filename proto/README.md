@@ -38,8 +38,9 @@ ID/title/order/URL changes and edits to a station stream configuration. The UTC
 millisecond field is informational. IDs should remain unchanged when only the
 display title or configuration changes.
 
-The catalog is generated from the [station] metadata in each TOML under
-server.stations_dir. The protobuf title field uses the same field number (2)
+The catalog is generated from flat TOML files under server.stations_dir.
+Each file is flat TOML with title and stream settings; id defaults to its
+filename without .toml. The protobuf title field uses the same field number (2)
 as the prototype name field. ECNG segments retain the ELTCP S framing.
 
 The mux listener is plain TCP with no authentication or encryption. Expose it

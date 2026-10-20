@@ -58,7 +58,7 @@ port = 9010
 stations_dir = "config/stations"
 output_root = "public"
 public_base_url = ""  # Optional HTTP directory URL, configured privately.
-max_clients = 32
+max_clients = 4096
 max_streams = 2
 
 [stream_defaults]
@@ -73,13 +73,12 @@ The server reads `*.toml` files in the stations folder in filename order.
 A station can inherit all global defaults:
 
 ```toml
-[station]
-id = "radio-a"
-title = "Radio A"
-
-[stream]
-input = "https://radio.example.com/live.mp3"
-# bandwidth_kbps = 1.5  # Optional per-station override.
+# config/stations/demo-station.toml
+# id = "demo-station"  # Optional; otherwise the filename supplies it.
+title = "Demo Radio"
+input = "https://example.invalid/live.mp3"
+input_options = ["-reconnect", "1"]
+bandwidth_kbps = 1.5  # Optional per-station override.
 ```
 
 Global paths resolve against `server.toml`; per-station path overrides resolve
@@ -142,3 +141,8 @@ for the OndaBaja service. Adapt `deploy/ondabaja-server.service` to your output
 paths and install `deploy/ondabaja-nginx.conf` into your HTTPS site.
 See [Linux deployment instructions](docs/DEPLOYMENT.md) for installation,
 directory permissions, and private configuration.
+
+Station files use flat TOML in `config/stations/`; their filename provides the
+stable station ID unless `id` is explicitly set. All TCP settings belong in
+root `server.toml`. ECNG always uses `beam_size = 1` internally; omit that knob
+and remove obsolete `refinement_passes` from station files.

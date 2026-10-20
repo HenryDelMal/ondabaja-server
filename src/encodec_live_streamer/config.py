@@ -49,7 +49,7 @@ class Config:
     window_segments: int = 16
     stale_grace_segments: int = 6
     threads: int = 1
-    beam_size: int = 8
+    beam_size: int = 1
     restart_ffmpeg: bool = True
     restart_delay: float = 2.0
     manifest_name: str = "stream.json"
@@ -204,12 +204,22 @@ class Config:
 
     @classmethod
     def from_toml(cls, path: str | pathlib.Path, *, default_codec: str | None = None,
-                  defaults: dict[str, Any] | None = None) -> Config:
+                  defaults: dict[str, Any] | None = None,
+                  station_config: bool = False) -> Config:
         source = pathlib.Path(path)
         with source.open("rb") as handle:
             raw = tomllib.load(handle)
 
+        if station_config and ("station" in raw or "stream" in raw):
+            raise ValueError("station settings must be flat TOML fields")
         table: dict[str, Any] = dict(raw.get("stream", raw))
+        if station_config:
+            for key in ("id", "title", "manifest_url"):
+                table.pop(key, None)
+            if any(key.startswith("tcp_") for key in table):
+                raise ValueError("TCP settings are global; configure them in server.toml")
+            if "refinement_passes" in table:
+                raise ValueError("refinement_passes is no longer supported; remove it")
         if "title" in table:
             table.pop("title")
             logging.getLogger(__name__).warning(
@@ -224,6 +234,8 @@ class Config:
 
         values = dict(defaults or {})
         values.update(table)
+        if station_config:
+            values["beam_size"] = 1
         if default_codec is not None:
             values.setdefault("codec", default_codec)
         missing = {"input", "output_dir"} - set(values)

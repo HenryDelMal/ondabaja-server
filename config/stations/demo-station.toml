@@ -1,0 +1,17 @@
+# Stable ID defaults to the filename without .toml; optionally set id explicitly.
+title = "Demo Radio"
+input = "https://example.invalid/live.mp3"
+
+input_options = [
+  "-rw_timeout", "15000000",
+  "-reconnect", "1",
+  "-reconnect_streamed", "1",
+  "-reconnect_delay_max", "5"
+]
+# output_options = []
+samplerate = 24
+bandwidth_kbps = 1.5
+segment_duration = 4.96
+window_segments = 12
+stale_grace_segments = 6
+threads = 1

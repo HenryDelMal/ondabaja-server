@@ -4,8 +4,9 @@ host = "0.0.0.0"
 port = 9010
 stations_dir = "config/stations"
 output_root = "public"
-revision_file = ".ondabaja-revision.json"
-max_clients = 32
+# Revision state defaults to output_root/.ondabaja-revision.json.
+public_base_url = ""
+max_clients = 4096
 max_streams = 2
 idle_timeout = 60.0
 fetch_wait = 15.0

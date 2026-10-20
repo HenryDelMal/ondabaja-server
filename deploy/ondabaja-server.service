@@ -17,6 +17,7 @@ Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
 UMask=0022
+LimitNOFILE=8192
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

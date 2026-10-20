@@ -36,8 +36,14 @@ Set `server.stations_dir = "config/stations.local"`, the deployment TCP port,
 `server.output_root`, and optional `server.public_base_url` in the private
 file. Keep real deployment addresses and ports out of tracked files. Match
 `max_streams` to your station count and the encoders the host can sustain.
-Every station requires `[station]` with `id` and `title`, and `[stream]` with
-`input`; shared encoder settings inherit from the private global file.
+The async TCP listener defaults to `max_clients = 4096`; its cap must fit the
+process file descriptor limit, available memory, and expected traffic. The
+systemd example sets `LimitNOFILE=8192`; raise it if you configure a larger cap.
+Each station is a flat TOML file containing `title`, `input`, and optional
+encoder or FFmpeg settings. Its filename provides the stable ID; an explicit
+`id` can override it. Shared encoder settings inherit from the private global
+file. TCP settings are global. ECNG beam size is fixed at 1; omit
+`beam_size` and remove obsolete `refinement_passes`.
 
 With the example `output_root = "public"`, the files are:
 

@@ -3,6 +3,7 @@ from dataclasses import replace
 import json
 import socket
 import tempfile
+import threading
 import unittest
 
 from encodec_live_streamer.config import Config
@@ -37,8 +38,8 @@ class StationFolderTests(unittest.TestCase):
 
     def station(self, filename, station_id, title):
         path = self.root / 'stations' / filename
-        path.write_text(f'[station]\nid="{station_id}"\ntitle="{title}"\n'
-                        f'[stream]\ninput="unused"\noutput_dir="output-{filename}"\n')
+        path.write_text(f'id="{station_id}"\ntitle="{title}"\n'
+                        f'input="unused"\noutput_dir="output-{filename}"\n')
         return path
 
     def load(self):
@@ -61,9 +62,9 @@ class StationFolderTests(unittest.TestCase):
             '[stream_defaults]\nmodel_dir="models"\n'
             'native_encoder="bin/encodec-live-native"\nbandwidth_kbps=1.5\n')
         (self.root / 'stations/a.toml').write_text(
-            '[station]\nid="a"\ntitle="A"\n[stream]\ninput="unused"\n')
+            'id="a"\ntitle="A"\ninput="unused"\n')
         (self.root / 'stations/b.toml').write_text(
-            '[station]\nid="b"\ntitle="B"\n[stream]\ninput="unused"\n'
+            'id="b"\ntitle="B"\ninput="unused"\n'
             'model_dir="private-models"\nbandwidth_kbps=3\n')
         _, streams = self.load()
         self.assertEqual(streams[0].model_dir, (self.root / 'models').resolve())
@@ -80,12 +81,35 @@ class StationFolderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'duplicate station id'):
             self.load()
 
+    def test_flat_station_infers_id_and_enforces_global_tcp_and_greedy_encoder(self):
+        path = self.root / 'stations' / 'demo-station.toml'
+        text = ('title="Demo Radio"\ninput="unused"\n'
+                'input_options=["-rw_timeout", "15000000"]\n'
+                'output_options=["-af", "volume=0.9"]\n'
+                'samplerate=24\nbandwidth_kbps=1.5\nsegment_duration=4.96\n'
+                'window_segments=12\nstale_grace_segments=6\nthreads=1\nbeam_size=8\n')
+        path.write_text(text)
+        config, streams = self.load()
+        self.assertEqual(config.stations[0].id, 'demo-station')
+        self.assertEqual(config.stations[0].title, 'Demo Radio')
+        self.assertEqual(streams[0].beam_size, 1)
+        self.assertEqual(streams[0].input_options, ('-rw_timeout', '15000000'))
+        self.assertEqual(streams[0].output_options, ('-af', 'volume=0.9'))
+        self.assertEqual(streams[0].output_dir,
+                         (self.root / 'public/demo-station').resolve())
+        path.write_text(text + 'tcp_port=9001\n')
+        with self.assertRaisesRegex(ValueError, 'TCP settings are global'):
+            self.load()
+        path.write_text(text + 'refinement_passes=2\n')
+        with self.assertRaisesRegex(ValueError, 'refinement_passes is no longer supported'):
+            self.load()
+
     def test_http_directory_and_tcp_catalog_match(self):
         (self.root / 'server.toml').write_text(
             '[server]\nstations_dir="stations"\noutput_root="published"\n'
             'public_base_url="https://radio.example.com/radios/"\n')
         (self.root / 'stations/a.toml').write_text(
-            '[station]\nid="radio a"\ntitle="A"\n[stream]\ninput="unused"\n')
+            'id="radio a"\ntitle="A"\ninput="unused"\n')
         config, streams = self.load()
         self.assertEqual(streams[0].output_dir, (self.root / 'published/radio a').resolve())
         self.assertEqual(config.stations[0].manifest_url,
@@ -108,8 +132,8 @@ class StationFolderTests(unittest.TestCase):
 
     def test_http_base_validation_and_station_override(self):
         path = self.station('a.toml', 'a', 'A')
-        path.write_text(path.read_text().replace('[station]',
-            '[station]\nmanifest_url="https://fallback.example.com/a/stream.json"'))
+        path.write_text(path.read_text().replace('title="A"',
+            'title="A"\nmanifest_url="https://fallback.example.com/a/stream.json"'))
         (self.root / 'server.toml').write_text(
             '[server]\nstations_dir="stations"\npublic_base_url="https://radio.example.com/radios"\n')
         config, _ = self.load()
@@ -126,7 +150,8 @@ class StationFolderTests(unittest.TestCase):
 
     def test_explicit_encodec_rejected(self):
         path = self.station('a.toml', 'a', 'First')
-        path.write_text(path.read_text().replace('[stream]', '[stream]\ncodec="EnCodec"'))
+        path.write_text(path.read_text().replace('input="unused"',
+            'input="unused"\ncodec="EnCodec"'))
         with self.assertRaisesRegex(ValueError, 'require codec=ECNG'):
             self.load()
 
@@ -153,3 +178,21 @@ class StationFolderTests(unittest.TestCase):
         self.assertEqual(payload(clients[1], b'm'), stores[1].snapshot().manifest)
         clients[0].sendall(b'C' + encode_varint(7))
         self.assertEqual(exact(clients[0], 1), b'n')
+
+    def test_async_listener_handles_many_idle_connections_on_one_thread(self):
+        store = ManifestStore(Config(input='unused', codec='ECNG',
+                                     output_dir=self.root / 'many', fsync=False))
+        server = OndaBajaTcpServer('127.0.0.1', 0,
+                                   (Radio('a', 'A', '', store),), 1,
+                                   max_clients=256)
+        server.start()
+        self.addCleanup(server.close)
+        clients = [socket.create_connection(server.address, timeout=2) for _ in range(256)]
+        for client in clients:
+            self.addCleanup(client.close)
+            client.settimeout(2)
+            client.sendall(b'H')
+        self.assertEqual(len([thread for thread in threading.enumerate()
+                              if thread.name == 'ondabaja-mux-asyncio']), 1)
+        for client in clients:
+            self.assertEqual(exact(client, 1), b'h')
