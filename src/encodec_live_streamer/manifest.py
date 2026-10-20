@@ -119,6 +119,7 @@ class PublishedSegment:
     discontinuity: bool
     absolute_frame: bytes | None = None
     legacy_frame: bytes | None = None
+    duration: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -340,7 +341,7 @@ class ManifestStore:
             frames = self._frames.get(item["sequence"], (None, None))
             self._retained[item["sequence"]] = PublishedSegment(
                 item["sequence"], item["uri"], item["byte_length"],
-                item["_crc32c"], item["discontinuity"], *frames,
+                item["_crc32c"], item["discontinuity"], *frames, item["duration"],
             )
         first = self.segments[0]["sequence"] if self.segments else self.next_sequence
         keep_from = max(0, first - self.config.stale_grace_segments)
@@ -354,12 +355,14 @@ class ManifestStore:
         for seq, item in self._retained.items():
             frames = self._frames.get(seq, (None, None))
             retained[seq] = PublishedSegment(item.sequence, item.uri, item.byte_length,
-                                            item.crc32c, item.discontinuity, *frames)
+                                            item.crc32c, item.discontinuity, *frames,
+                                            item.duration)
         self._retained = retained
         return PublicationSnapshot(
             manifest,
             tuple(PublishedSegment(item["sequence"], item["uri"], item["byte_length"],
-                                   item["_crc32c"], item["discontinuity"])
+                                   item["_crc32c"], item["discontinuity"],
+                                   duration=item["duration"])
                   for item in self.segments),
             self.next_sequence,
             b"m" + _protobuf_varint(len(manifest)) + manifest,

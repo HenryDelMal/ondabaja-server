@@ -1,7 +1,9 @@
 from pathlib import Path
+import asyncio
 from dataclasses import replace
 import json
 import socket
+import struct
 import tempfile
 import threading
 import time
@@ -9,7 +11,7 @@ import unittest
 
 from encodec_live_streamer.config import Config
 from encodec_live_streamer.ecdc import make_test_ecdc
-from encodec_live_streamer.manifest import ManifestStore
+from encodec_live_streamer.manifest import ManifestStore, crc32c
 from encodec_live_streamer.mux import OndaBajaTcpServer, Radio
 from encodec_live_streamer.ondabaja import OndaBajaService, load_ondabaja_config
 from encodec_live_streamer.tcp import encode_varint, read_varint
@@ -28,6 +30,22 @@ def exact(sock, size):
 def payload(sock, kind):
     assert exact(sock, 1) == kind
     return exact(sock, read_varint(sock))
+
+
+def startup_response(sock):
+    assert exact(sock, 1) == b'B'
+    selection_id = read_varint(sock)
+    manifest = exact(sock, read_varint(sock))
+    marker = exact(sock, 1)
+    if marker == b'n':
+        return selection_id, manifest, None, None, None, None
+    assert marker == b'S'
+    sequence = read_varint(sock)
+    segment_length = read_varint(sock)
+    checksum = struct.unpack('>I', exact(sock, 4))[0]
+    flags = exact(sock, 1)[0]
+    segment = exact(sock, segment_length)
+    return selection_id, manifest, sequence, checksum, flags, segment
 
 
 class StationFolderTests(unittest.TestCase):
@@ -225,6 +243,172 @@ class StationFolderTests(unittest.TestCase):
         # of later commands on this still-open connection.
         client.sendall(b'M')
         self.assertEqual(payload(client, b'm'), stores[1].snapshot().manifest)
+        client.sendall(b'H')
+        self.assertEqual(exact(client, 1), b'h')
+
+    def test_bundled_startup_selects_lookback_and_frames_crc(self):
+        store = ManifestStore(Config(input='unused', codec='ECNG',
+                    output_dir=self.root / 'startup', fsync=False,
+                    segment_duration=1, window_segments=12))
+        payloads = []
+        sample_count = store.config.samples_per_segment
+        for sequence in range(12):
+            encoded = make_test_ecdc(sample_count, store.config.codebooks,
+                                     store.config.model)
+            payloads.append(encoded)
+            store.publish_segment(
+                encoded, sample_count=sample_count,
+                pts_samples=sequence * sample_count,
+                program_date_time='2026-01-01T00:00:00Z', epoch='startup',
+                discontinuity=sequence == 0,
+            )
+        radio = Radio('startup', 'Startup', '', store)
+        server = OndaBajaTcpServer('127.0.0.1', 0, (radio,), 1)
+        server.start()
+        self.addCleanup(server.close)
+        client = socket.create_connection(server.address, timeout=1)
+        self.addCleanup(client.close)
+        client.settimeout(1)
+
+        # A 1 s target chooses the newest segment; the two-entry retention
+        # margin is a minimum index, matching LiveSequenceTracker.
+        client.sendall(b'B' + encode_varint(101) + encode_varint(7) +
+                       b'startup' + encode_varint(1000))
+        selection_id, manifest, sequence, checksum, flags, segment = startup_response(client)
+        self.assertEqual(selection_id, 101)
+        self.assertEqual(manifest, store.snapshot().manifest)
+        self.assertEqual(sequence, 11)
+        self.assertEqual(segment, payloads[11])
+        self.assertEqual(checksum, crc32c(segment))
+        self.assertEqual(flags, 0)
+
+        # Accumulate actual segment durations backward to the 5 s target.
+        client.sendall(b'B' + encode_varint(102) + encode_varint(7) +
+                       b'startup' + encode_varint(5000))
+        selection_id, _, sequence, checksum, flags, segment = startup_response(client)
+        self.assertEqual(selection_id, 102)
+        self.assertEqual(sequence, 7)
+        self.assertEqual(segment, payloads[7])
+        self.assertEqual(checksum, crc32c(segment))
+        self.assertEqual(flags, 0)
+
+    def test_bundled_startup_empty_and_unknown_station_responses(self):
+        store = ManifestStore(Config(input='unused', codec='ECNG',
+                                     output_dir=self.root / 'empty', fsync=False))
+        server = OndaBajaTcpServer('127.0.0.1', 0,
+                                   (Radio('empty', 'Empty', '', store),), 1)
+        server.start()
+        self.addCleanup(server.close)
+        client = socket.create_connection(server.address, timeout=1)
+        self.addCleanup(client.close)
+        client.settimeout(1)
+
+        client.sendall(b'B' + encode_varint(1) + encode_varint(5) +
+                       b'empty' + encode_varint(30000))
+        selection_id, manifest, sequence, checksum, flags, segment = startup_response(client)
+        self.assertEqual(selection_id, 1)
+        self.assertEqual(manifest, store.snapshot().manifest)
+        self.assertIsNone(sequence)
+        self.assertIsNone(checksum)
+        self.assertIsNone(flags)
+        self.assertIsNone(segment)
+
+        client.sendall(b'B' + encode_varint(2) + encode_varint(7) +
+                       b'missing' + encode_varint(30000))
+        self.assertEqual(exact(client, 1), b'x')
+        client.sendall(b'H')
+        self.assertEqual(exact(client, 1), b'h')
+
+    def test_bundled_startup_preempts_pending_fetch_during_publication(self):
+        stores = [ManifestStore(Config(input='unused', codec='ECNG',
+                    output_dir=self.root / name, fsync=False,
+                    segment_duration=1)) for name in ('pending', 'new')]
+        sample_count = stores[1].config.samples_per_segment
+        encoded = make_test_ecdc(sample_count, stores[1].config.codebooks,
+                                 stores[1].config.model)
+        stores[1].publish_segment(
+            encoded, sample_count=sample_count, pts_samples=0,
+            program_date_time='2026-01-01T00:00:00Z', epoch='new-station',
+            discontinuity=True,
+        )
+        radios = tuple(Radio(name, name.upper(), '', store)
+                       for name, store in zip(('pending', 'new'), stores))
+        server = OndaBajaTcpServer('127.0.0.1', 0, radios, 1, wait_seconds=2.0)
+        server.start()
+        self.addCleanup(server.close)
+        client = socket.create_connection(server.address, timeout=1)
+        self.addCleanup(client.close)
+        client.settimeout(1)
+        client.sendall(b'R' + encode_varint(7) + b'pending')
+        self.assertEqual(payload(client, b'm'), stores[0].snapshot().manifest)
+        client.sendall(b'f\x00')
+        time.sleep(0.05)
+
+        def publish_pending_station():
+            time.sleep(0.005)
+            store = stores[0]
+            samples = store.config.samples_per_segment
+            old_encoded = make_test_ecdc(samples, store.config.codebooks,
+                                         store.config.model)
+            store.publish_segment(
+                old_encoded, sample_count=samples, pts_samples=0,
+                program_date_time='2026-01-01T00:00:00Z', epoch='old-station',
+                discontinuity=True,
+            )
+
+        publisher = threading.Thread(target=publish_pending_station)
+        publisher.start()
+        started = time.monotonic()
+        client.sendall(b'B' + encode_varint(99) + encode_varint(3) +
+                       b'new' + encode_varint(30000))
+        selection_id, manifest, sequence, checksum, flags, segment = startup_response(client)
+        self.assertEqual(selection_id, 99)
+        self.assertEqual(manifest, stores[1].snapshot().manifest)
+        self.assertEqual(sequence, 0)
+        self.assertEqual(segment, encoded)
+        self.assertEqual(checksum, crc32c(encoded))
+        self.assertEqual(flags, 1)
+        self.assertLess(time.monotonic() - started, 0.5)
+        publisher.join(timeout=1)
+        self.assertFalse(publisher.is_alive())
+        client.sendall(b'H')
+        self.assertEqual(exact(client, 1), b'h')
+
+    def test_bundled_startup_retry_is_processed_during_preparation(self):
+        store = ManifestStore(Config(input='unused', codec='ECNG',
+                    output_dir=self.root / 'retry', fsync=False))
+        sample_count = store.config.samples_per_segment
+        encoded = make_test_ecdc(sample_count, store.config.codebooks, store.config.model)
+        store.publish_segment(
+            encoded, sample_count=sample_count, pts_samples=0,
+            program_date_time='2026-01-01T00:00:00Z', epoch='retry',
+            discontinuity=True,
+        )
+        server = OndaBajaTcpServer('127.0.0.1', 0,
+                                   (Radio('retry', 'Retry', '', store),), 1)
+        original_startup_response = server._startup_response
+
+        async def delayed_startup_response(radio, selection_id, lookback_ms):
+            await asyncio.sleep(0.1)
+            return await original_startup_response(radio, selection_id, lookback_ms)
+
+        server._startup_response = delayed_startup_response
+        server.start()
+        self.addCleanup(server.close)
+        client = socket.create_connection(server.address, timeout=1)
+        self.addCleanup(client.close)
+        client.settimeout(1)
+        request = b'B' + encode_varint(55) + encode_varint(5) + b'retry' + encode_varint(30000)
+        client.sendall(request)
+        time.sleep(0.02)
+        client.sendall(request)
+        selection_id, manifest, sequence, checksum, flags, segment = startup_response(client)
+        self.assertEqual(selection_id, 55)
+        self.assertEqual(manifest, store.snapshot().manifest)
+        self.assertEqual(sequence, 0)
+        self.assertEqual(segment, encoded)
+        self.assertEqual(checksum, crc32c(encoded))
+        self.assertEqual(flags, 1)
         client.sendall(b'H')
         self.assertEqual(exact(client, 1), b'h')
 

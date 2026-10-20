@@ -15,6 +15,7 @@ LOG = logging.getLogger(__name__)
 MAX_CATALOG_BYTES = 256 * 1024
 MAX_STATION_ID_BYTES = 128
 _CATALOG_RELOADED = object()
+_CLOSE_CONNECTION = object()
 
 
 def _pb_uint(field: int, value: int) -> bytes:
@@ -67,8 +68,10 @@ async def _write(writer: asyncio.StreamWriter, frame: bytes) -> None:
     await writer.drain()
 
 
-async def _segment_frame(store: ManifestStore, item: PublishedSegment) -> bytes | None:
-    cached = store.snapshot().retained_segments.get(item.sequence)
+async def _segment_frame(store: ManifestStore, item: PublishedSegment,
+                         snapshot=None) -> bytes | None:
+    view = snapshot if snapshot is not None else store.snapshot()
+    cached = view.retained_segments.get(item.sequence)
     if cached is not None and cached.absolute_frame is not None:
         return cached.absolute_frame
     try:
@@ -188,6 +191,136 @@ class OndaBajaTcpServer:
         await _write(writer, radio.store.snapshot().manifest_frame)
         return radio
 
+    async def _startup_response(self, radio: Radio, selection_id: int,
+                                lookback_ms: int) -> bytes:
+        """Build a B selection response from one immutable station snapshot."""
+        snapshot = radio.store.snapshot()
+        manifest = snapshot.manifest
+        prefix = b"B" + encode_varint(selection_id) + encode_varint(len(manifest)) + manifest
+        if not snapshot.segments:
+            return prefix + b"n"
+
+        segments = snapshot.segments
+        index = len(segments) - 1
+        buffered_ms = int(segments[index].duration * 1000)
+        target_ms = max(1, lookback_ms)
+        while index > 0 and buffered_ms < target_ms:
+            index -= 1
+            buffered_ms += int(segments[index].duration * 1000)
+        # Match LiveSequenceTracker: retain a two-segment deletion margin for
+        # useful windows (8+ entries), while allowing smaller windows whole.
+        if len(segments) >= 8:
+            index = max(index, 2)
+
+        selected = segments[index]
+        frame = await _segment_frame(radio.store, selected, snapshot)
+        if frame is None or not frame.startswith(b"S"):
+            return prefix + b"n"
+        return prefix + b"S" + encode_varint(selected.sequence) + frame[1:]
+
+    async def _read_station_request_data(self, reader, command: bytes):
+        selection_id = None
+        if command == b"B":
+            selection_id = await _read_varint(reader, self.idle_timeout)
+            if selection_id == 0:
+                raise ValueError("B selection ID must be positive")
+        size = await _read_varint(reader, self.idle_timeout)
+        if size == 0 or size > MAX_STATION_ID_BYTES:
+            raise ValueError("invalid station ID length")
+        raw_id = await self._read_exactly(reader, size)
+        lookback_ms = (await _read_varint(reader, self.idle_timeout)
+                       if command == b"B" else None)
+        return raw_id, selection_id, lookback_ms
+
+    async def _startup_exchange(self, reader, writer, radio: Radio,
+                                selection_id: int, lookback_ms: int) -> Radio | object:
+        """Prepare B while still accepting a same-socket retry or switch."""
+        request_id = selection_id
+        request_station = radio.id
+        request_lookback = lookback_ms
+        preparation = asyncio.create_task(
+            self._startup_response(radio, request_id, request_lookback))
+        incoming = asyncio.create_task(reader.read(1))
+        try:
+            while True:
+                done, _ = await asyncio.wait((preparation, incoming),
+                                             return_when=asyncio.FIRST_COMPLETED)
+                # Process a command first if it arrived in the same event-loop
+                # turn as preparation completion. This makes B retries and R
+                # switches deterministic and prevents an abandoned B reply.
+                if incoming in done:
+                    command = incoming.result()
+                    if not command or command in (b"Q", b"q"):
+                        preparation.cancel()
+                        await asyncio.gather(preparation, return_exceptions=True)
+                        return _CLOSE_CONNECTION
+                    if command == b"H":
+                        await _write(writer, b"h")
+                        incoming = asyncio.create_task(reader.read(1))
+                        continue
+                    if command == b"R":
+                        preparation.cancel()
+                        await asyncio.gather(preparation, return_exceptions=True)
+                        raw_id, _, _ = await self._read_station_request_data(reader, command)
+                        return await self._select_radio(writer, raw_id)
+                    if command != b"B":
+                        raise ValueError("only B, R, H, or Q may interrupt B preparation")
+
+                    raw_id, retry_id, retry_lookback = await self._read_station_request_data(
+                        reader, command)
+                    station_id = raw_id.decode("utf-8")
+                    if (retry_id == request_id and station_id == request_station
+                            and retry_lookback == request_lookback):
+                        # The in-flight response satisfies this retry because
+                        # the client correlates it with selectionId.
+                        incoming = asyncio.create_task(reader.read(1))
+                        continue
+
+                    preparation.cancel()
+                    await asyncio.gather(preparation, return_exceptions=True)
+                    radio = self.radios_by_id.get(station_id)
+                    if radio is None:
+                        await _write(writer, b"x")
+                        return None
+                    request_id = retry_id
+                    request_station = station_id
+                    request_lookback = retry_lookback or 0
+                    preparation = asyncio.create_task(
+                        self._startup_response(radio, request_id, request_lookback))
+                    incoming = asyncio.create_task(reader.read(1))
+                    continue
+
+                response = preparation.result()
+                if not incoming.done():
+                    incoming.cancel()
+                    await asyncio.gather(incoming, return_exceptions=True)
+                    incoming = None
+                await _write(writer, response)
+                return radio
+        finally:
+            if not preparation.done():
+                preparation.cancel()
+            await asyncio.gather(preparation, return_exceptions=True)
+            if incoming is not None and not incoming.done():
+                incoming.cancel()
+            if incoming is not None:
+                await asyncio.gather(incoming, return_exceptions=True)
+
+    async def _read_station_request(self, reader, writer,
+                                    command: bytes) -> Radio | object | None:
+        raw_id, selection_id, lookback_ms = await self._read_station_request_data(
+            reader, command)
+        if command == b"R":
+            return await self._select_radio(writer, raw_id)
+
+        station_id = raw_id.decode("utf-8")
+        radio = self.radios_by_id.get(station_id)
+        if radio is None:
+            await _write(writer, b"x")
+            return None
+        return await self._startup_exchange(reader, writer, radio, selection_id,
+                                            lookback_ms or 0)
+
     async def _fetch(self, reader, writer, radio: Radio, sequence: int,
                      catalog_changed: asyncio.Event):
         loop = asyncio.get_running_loop()
@@ -218,15 +351,14 @@ class OndaBajaTcpServer:
                 incoming = asyncio.create_task(reader.read(1))
                 incoming_deadline = loop.time() + self.idle_timeout
                 return "continue", None
-            if command == b"R":
-                size = await _read_varint(reader, self.idle_timeout)
-                if size > MAX_STATION_ID_BYTES:
-                    raise ValueError("station ID exceeds protocol limit")
-                raw_id = await self._read_exactly(reader, size)
-                return "selected", await self._select_radio(writer, raw_id)
+            if command in (b"R", b"B"):
+                selected = await self._read_station_request(reader, writer, command)
+                if selected is _CLOSE_CONNECTION:
+                    return "close", None
+                return "selected", selected
             if command in (b"Q", b"q"):
                 return "close", None
-            raise ValueError("only R, H, or Q may interrupt a pending f request")
+            raise ValueError("only R, B, H, or Q may interrupt a pending f request")
 
         async def handle_ready_interrupt():
             # Let the socket reader run once before committing a segment or
@@ -402,12 +534,10 @@ class OndaBajaTcpServer:
                     radio = self.radios_by_id.get(radio.id)
                 if command in (b"Q", b"q"):
                     return
-                if command == b"R":
-                    size = await _read_varint(reader, self.idle_timeout)
-                    if size > MAX_STATION_ID_BYTES:
-                        raise ValueError("station ID exceeds protocol limit")
-                    selected = await self._select_radio(
-                        writer, await self._read_exactly(reader, size))
+                if command in (b"R", b"B"):
+                    selected = await self._read_station_request(reader, writer, command)
+                    if selected is _CLOSE_CONNECTION:
+                        return
                     if selected is not None:
                         radio = selected
                         last_frame = None

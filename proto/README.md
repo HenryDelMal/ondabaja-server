@@ -16,6 +16,7 @@ Commands are:
 |---|---|---|
 | `C` | last catalog revision varint | `n` if equal, otherwise framed `c` catalog |
 | `R` | varint byte length + UTF-8 stable station ID | framed `m` manifest; switches this socket |
+| `B` | positive selection ID varint + station-ID byte-length varint + UTF-8 station ID + startup-lookback milliseconds varint | bundled manifest and first startup segment, or `n`; switches this socket |
 | `M` | none | current selected station's framed `m` manifest |
 | `f` | absolute sequence varint | `S`, `g`, or `n` using existing ELTCP v1 rules |
 | `e` | none | retry the previous complete `S` frame |
@@ -30,6 +31,34 @@ fetch. A client must read framed response types and allow `m` to supersede a
 pending `f`; it must then discard the old station's compressed queue, expected
 sequence, retry state, and queued PCM before restarting from the new manifest.
 `H` is also accepted during a pending fetch and is answered with `h`.
+`B` selects a station and returns its startup data in one response. The reply
+is `B` + the same selection-ID varint + manifest byte-length varint + manifest protobuf, followed by either
+`n` when the manifest has no playable segment, or `S` + absolute-sequence
+varint + the existing segment body (segment byte-length varint, four-byte
+big-endian CRC32C, one flags byte, and the exact ECNG bytes). There is no
+additional `S` marker before the segment length. For an unknown station the
+reply is the single byte `x`. A client may retry the same `B` request with the
+same selection ID on the same open socket. The server recognizes a retry while
+the response is being prepared and lets the pending response satisfy it. If a
+retry arrives after that response was sent, it is a new request and its reply
+contains the same selection ID; clients can ignore already-consumed IDs.
+Selection IDs are positive uint64 values echoed to correlate replies with the
+current station-selection attempt.
+
+The startup segment is chosen from the same immutable manifest snapshot in the
+response. Starting at the newest segment, walk backward until accumulated
+segment durations reach `max(1, startupLookbackMs)`. When the manifest has at
+least eight segments, choose index 2 or later, leaving the two oldest segments
+unused as the client's deletion margin. Smaller windows use all available entries.
+This matches the Android `LiveSequenceTracker` startup selection algorithm.
+An empty manifest returns the manifest followed by `n`.
+
+Like `R`, `B` preempts a pending `f` on the same socket. Once the server has
+read the complete `B` request, the bundled response supersedes the pending
+fetch; no `S` or `n` response for that old fetch is sent. The server builds the
+whole bundle before writing it, so its manifest and segment framing remain
+contiguous as one response.
+
 After a successful configuration reload, the server sends `u` to every
 currently connected client. It may arrive while a client is waiting for a
 segment or while the connection is otherwise idle. If it interrupts `f`, that
