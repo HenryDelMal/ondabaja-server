@@ -192,52 +192,121 @@ def load_ondabaja_config(path: str | pathlib.Path) -> tuple[OndaBajaConfig, tupl
 class OndaBajaService:
     """Runs one isolated publisher per station and a shared selection listener."""
 
-    def __init__(self, config: OndaBajaConfig, stream_configs: tuple[Config, ...]):
+    def __init__(self, config: OndaBajaConfig, stream_configs: tuple[Config, ...],
+                 config_path: str | pathlib.Path = "server.toml"):
         self.config = config
-        self.services = [LiveService(stream, segment_cache_enabled=True)
-                         for stream in stream_configs]
-        radios = tuple(Radio(station.id, station.title, station.manifest_url, service.store)
-                       for station, service in zip(config.stations, self.services))
+        self.config_path = pathlib.Path(config_path).resolve()
+        self.services = {station.id: LiveService(stream, segment_cache_enabled=True)
+                         for station, stream in zip(config.stations, stream_configs)}
+        radios = self._radios(config.stations, self.services)
         self.tcp = OndaBajaTcpServer(config.host, config.port, radios, config.revision,
                                      config.idle_timeout, config.fetch_wait, config.max_clients)
         self.stopping = threading.Event()
+        self.reload_requested = threading.Event()
         self.errors: list[BaseException] = []
-        self.threads: list[threading.Thread] = []
+        self.threads: dict[str, threading.Thread] = {}
+        self._retiring_services: set[str] = set()
+
+    @staticmethod
+    def _radios(stations: tuple[StationConfig, ...],
+                services: dict[str, LiveService]) -> tuple[Radio, ...]:
+        return tuple(Radio(station.id, station.title, station.manifest_url,
+                           services[station.id].store) for station in stations)
 
     def stop(self, *_args) -> None:
         self.stopping.set()
-        for service in self.services:
+        for service in self.services.values():
             service.request_stop()
+
+    def _start_station(self, station: StationConfig, service: LiveService) -> None:
+        def run_station() -> None:
+            try:
+                service.run(install_signal_handlers=False)
+            except BaseException as error:
+                # A replaced station may stop as part of a normal reload.
+                if (self.services.get(station.id) is service
+                        and station.id not in self._retiring_services):
+                    self.errors.append(error)
+                    LOG.exception("station publisher %s failed", station.id)
+                    self.stop()
+
+        thread = threading.Thread(target=run_station, name=f"radio-{station.id}", daemon=True)
+        self.threads[station.id] = thread
+        thread.start()
+
+    def _reload(self) -> None:
+        LOG.info("reloading station configuration from %s", self.config_path)
+        new_config, stream_configs = load_ondabaja_config(self.config_path)
+        if (new_config.host, new_config.port) != (self.config.host, self.config.port):
+            raise ValueError("server.host or server.port changed; restart the service to rebind TCP")
+
+        old_streams = {station_id: service.config
+                       for station_id, service in self.services.items()}
+        new_services: dict[str, LiveService] = {}
+        new_stream_by_id = {station.id: stream
+                            for station, stream in zip(new_config.stations, stream_configs)}
+        for station in new_config.stations:
+            previous = self.services.get(station.id)
+            if previous is not None and old_streams[station.id] == new_stream_by_id[station.id]:
+                new_services[station.id] = previous
+            else:
+                new_services[station.id] = LiveService(
+                    new_stream_by_id[station.id], segment_cache_enabled=True)
+
+        replaced = {station_id: service for station_id, service in self.services.items()
+                    if new_services.get(station_id) is not service}
+        self._retiring_services.update(replaced)
+        for service in replaced.values():
+            service.request_stop()
+        for station_id in replaced:
+            thread = self.threads.pop(station_id, None)
+            if thread is not None:
+                thread.join(timeout=15)
+                if thread.is_alive():
+                    raise RuntimeError(f"station publisher {station_id} did not stop for reload")
+        self._retiring_services.difference_update(replaced)
+
+        self.config = new_config
+        self.services = new_services
+        self.tcp.idle_timeout = new_config.idle_timeout
+        self.tcp.wait_seconds = new_config.fetch_wait
+        self.tcp.max_clients = new_config.max_clients
+        self.tcp.update_catalog(self._radios(new_config.stations, new_services),
+                                new_config.revision)
+        for station in new_config.stations:
+            if station.id not in self.threads:
+                self._start_station(station, new_services[station.id])
+        self.publish_catalog()
+        self.tcp.notify_catalog_changed()
+        LOG.info("reloaded %d stations revision=%d", len(new_config.stations),
+                 new_config.revision)
 
     def run(self) -> None:
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, self.stop)
-
-        def run_station(station_id: str, service: LiveService) -> None:
-            try:
-                service.run(install_signal_handlers=False)
-            except BaseException as error:
-                self.errors.append(error)
-                LOG.exception("station publisher %s failed", station_id)
-                self.stop()
+        signal.signal(signal.SIGHUP, lambda *_args: self.reload_requested.set())
 
         try:
             self.publish_catalog()
-            self.threads = [threading.Thread(target=run_station,
-                              args=(station.id, service), name=f"radio-{station.id}", daemon=True)
-                            for station, service in zip(self.config.stations, self.services)]
-            for thread in self.threads:
-                thread.start()
+            for station in self.config.stations:
+                self._start_station(station, self.services[station.id])
             self.tcp.start()
             LOG.info("serving %d stations at %s revision=%d", len(self.services),
                      self.tcp.address, self.config.revision)
             while not self.stopping.wait(0.25):
+                if self.reload_requested.is_set():
+                    self.reload_requested.clear()
+                    try:
+                        self._reload()
+                    except (OSError, ValueError, RuntimeError) as error:
+                        LOG.exception("station reload failed; keeping the active configuration: %s",
+                                      error)
                 if self.errors:
                     break
             self.stop()
         finally:
             self.tcp.close()
-            for thread in self.threads:
+            for thread in self.threads.values():
                 thread.join(timeout=10)
         if self.errors:
             raise RuntimeError(f"station publisher stopped after error: {self.errors[0]}")

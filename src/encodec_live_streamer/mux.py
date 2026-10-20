@@ -14,6 +14,7 @@ from .tcp import absolute_segment_frame, encode_varint, payload_frame, read_vari
 LOG = logging.getLogger(__name__)
 MAX_CATALOG_BYTES = 256 * 1024
 MAX_STATION_ID_BYTES = 128
+_CATALOG_RELOADED = object()
 
 
 def _pb_uint(field: int, value: int) -> bytes:
@@ -102,6 +103,7 @@ class OndaBajaTcpServer:
         self._server: asyncio.AbstractServer | None = None
         self._writers: set[asyncio.StreamWriter] = set()
         self._client_tasks: set[asyncio.Task] = set()
+        self._client_changes: dict[asyncio.StreamWriter, asyncio.Event] = {}
         self._stopping = threading.Event()
 
     @property
@@ -146,6 +148,32 @@ class OndaBajaTcpServer:
         self._started = True
         LOG.info("OndaBaja async TCP listening on %s", self.address)
 
+    async def _update_catalog(self, radios: tuple[Radio, ...], revision: int) -> None:
+        self.radios = tuple(radios)
+        self.radios_by_id = {radio.id: radio for radio in radios}
+        self.revision = revision
+        self.catalog_updated_at_unix_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        self.catalog = _catalog_bytes(revision, self.catalog_updated_at_unix_ms, self.radios)
+
+    async def _notify_catalog_changed(self) -> None:
+        for changed in tuple(self._client_changes.values()):
+            changed.set()
+
+    def update_catalog(self, radios: tuple[Radio, ...], revision: int) -> None:
+        """Replace station metadata without rebinding the TCP listener."""
+        if self._loop is None or self._thread is None:
+            raise RuntimeError("OndaBaja TCP listener is not running")
+        asyncio.run_coroutine_threadsafe(
+            self._update_catalog(radios, revision), self._loop
+        ).result(timeout=10)
+
+    def notify_catalog_changed(self) -> None:
+        if self._loop is None or self._thread is None:
+            raise RuntimeError("OndaBaja TCP listener is not running")
+        asyncio.run_coroutine_threadsafe(
+            self._notify_catalog_changed(), self._loop
+        ).result(timeout=10)
+
     async def _read_exactly(self, reader: asyncio.StreamReader, count: int) -> bytes:
         return await asyncio.wait_for(reader.readexactly(count), self.idle_timeout)
 
@@ -160,7 +188,8 @@ class OndaBajaTcpServer:
         await _write(writer, radio.store.snapshot().manifest_frame)
         return radio
 
-    async def _fetch(self, reader, writer, radio: Radio, sequence: int):
+    async def _fetch(self, reader, writer, radio: Radio, sequence: int,
+                     catalog_changed: asyncio.Event):
         loop = asyncio.get_running_loop()
         changed = asyncio.Event()
 
@@ -172,10 +201,19 @@ class OndaBajaTcpServer:
 
         radio.store.subscribe_publication(notify)
         deadline = loop.time() + self.wait_seconds
-        incoming = asyncio.create_task(asyncio.wait_for(reader.read(1), self.idle_timeout))
+        # Keep the read itself as the task. Wrapping a freshly-created read
+        # coroutine in wait_for can leave it unawaited if this task is
+        # cancelled before wait_for gets its first event-loop turn.
+        incoming = asyncio.create_task(reader.read(1))
+        incoming_deadline = loop.time() + self.idle_timeout
         publication = None
+        catalog_notification = None
         try:
             while not self._stopping.is_set():
+                if catalog_changed.is_set():
+                    catalog_changed.clear()
+                    await _write(writer, b"u")
+                    return _CATALOG_RELOADED, None, False
                 changed.clear()
                 snapshot = radio.store.snapshot()
                 if sequence < snapshot.next_sequence:
@@ -192,19 +230,27 @@ class OndaBajaTcpServer:
                     await _write(writer, b"n")
                     return None, None, False
                 publication = asyncio.create_task(changed.wait())
-                done, _ = await asyncio.wait((incoming, publication), timeout=remaining,
+                catalog_notification = asyncio.create_task(catalog_changed.wait())
+                read_remaining = incoming_deadline - loop.time()
+                if read_remaining <= 0:
+                    raise asyncio.TimeoutError
+                done, _ = await asyncio.wait((incoming, publication, catalog_notification),
+                                             timeout=min(remaining, read_remaining),
                                              return_when=asyncio.FIRST_COMPLETED)
                 if incoming in done:
                     publication.cancel()
                     await asyncio.gather(publication, return_exceptions=True)
                     publication = None
+                    catalog_notification.cancel()
+                    await asyncio.gather(catalog_notification, return_exceptions=True)
+                    catalog_notification = None
                     command = incoming.result()
                     if not command:
                         return None, None, True
                     if command == b"H":
                         await _write(writer, b"h")
-                        incoming = asyncio.create_task(
-                            asyncio.wait_for(reader.read(1), self.idle_timeout))
+                        incoming = asyncio.create_task(reader.read(1))
+                        incoming_deadline = loop.time() + self.idle_timeout
                         continue
                     if command == b"R":
                         size = await _read_varint(reader, self.idle_timeout)
@@ -216,17 +262,27 @@ class OndaBajaTcpServer:
                     if command in (b"Q", b"q"):
                         return None, None, True
                     raise ValueError("only R, H, or Q may interrupt a pending f request")
+                if catalog_notification in done:
+                    catalog_notification = None
+                    catalog_changed.clear()
+                    await _write(writer, b"u")
+                    return _CATALOG_RELOADED, None, False
                 if publication in done:
                     publication = None
                     continue
-                await _write(writer, b"n")
-                return None, None, False
+                if loop.time() >= deadline:
+                    await _write(writer, b"n")
+                    return None, None, False
+                raise asyncio.TimeoutError
             return None, None, True
         finally:
             radio.store.unsubscribe_publication(notify)
             if publication is not None and not publication.done():
                 publication.cancel()
                 await asyncio.gather(publication, return_exceptions=True)
+            if catalog_notification is not None and not catalog_notification.done():
+                catalog_notification.cancel()
+                await asyncio.gather(catalog_notification, return_exceptions=True)
             if not incoming.done():
                 incoming.cancel()
             await asyncio.gather(incoming, return_exceptions=True)
@@ -247,12 +303,30 @@ class OndaBajaTcpServer:
         if task is not None:
             self._client_tasks.add(task)
         self._writers.add(writer)
+        catalog_changed = asyncio.Event()
+        self._client_changes[writer] = catalog_changed
         peer = writer.get_extra_info("peername")
         radio: Radio | None = None
         last_frame: bytes | None = None
         try:
             while not self._stopping.is_set():
-                command = await self._read_exactly(reader, 1)
+                command_read = asyncio.create_task(self._read_exactly(reader, 1))
+                change_wait = asyncio.create_task(catalog_changed.wait())
+                done, _ = await asyncio.wait((command_read, change_wait),
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if change_wait in done and command_read not in done:
+                    catalog_changed.clear()
+                    await _write(writer, b"u")
+                    change_wait.cancel()
+                    await asyncio.gather(change_wait, return_exceptions=True)
+                    # Keep the pending socket read for the next loop iteration.
+                    command = await command_read
+                else:
+                    change_wait.cancel()
+                    await asyncio.gather(change_wait, return_exceptions=True)
+                    command = command_read.result()
+                if radio is not None:
+                    radio = self.radios_by_id.get(radio.id)
                 if command in (b"Q", b"q"):
                     return
                 if command == b"R":
@@ -277,9 +351,12 @@ class OndaBajaTcpServer:
                     if radio is None:
                         await _write(writer, b"x")
                         continue
-                    selected, frame, close = await self._fetch(reader, writer, radio, sequence)
+                    selected, frame, close = await self._fetch(
+                        reader, writer, radio, sequence, catalog_changed)
                     if close:
                         return
+                    if selected is _CATALOG_RELOADED:
+                        continue
                     if selected is not None:
                         radio = selected
                         last_frame = None
@@ -296,6 +373,7 @@ class OndaBajaTcpServer:
             LOG.debug("OndaBaja TCP connection from %s ended: %s", peer, error)
         finally:
             self._writers.discard(writer)
+            self._client_changes.pop(writer, None)
             if task is not None:
                 self._client_tasks.discard(task)
             writer.close()

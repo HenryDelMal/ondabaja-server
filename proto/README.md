@@ -21,6 +21,7 @@ Commands are:
 | `e` | none | retry the previous complete `S` frame |
 | `H` | none | `h` liveness echo |
 | `Q` | none | close |
+| server `u` | none | unsolicited catalog/manifest-changed notification; no payload |
 
 While `f` is waiting for a future sequence, the server continues checking the
 socket. An `R` request cancels that wait and immediately returns the newly
@@ -29,6 +30,15 @@ fetch. A client must read framed response types and allow `m` to supersede a
 pending `f`; it must then discard the old station's compressed queue, expected
 sequence, retry state, and queued PCM before restarting from the new manifest.
 `H` is also accepted during a pending fetch and is answered with `h`.
+After a successful configuration reload, the server sends `u` to every
+currently connected client. It may arrive while a client is waiting for a
+segment or while the connection is otherwise idle. If it interrupts `f`, that
+fetch has no segment response. The client should request `C` with its cached
+revision, then send `R` with its currently selected station ID to receive the
+latest manifest on the same TCP connection. If that station was removed, `R`
+returns `x`; the client should keep the socket and let the user select another
+catalog entry. The notification is a hint; the catalog revision remains the
+authoritative change detector.
 
 The request stream has one active station and one outstanding fetch per
 connection. The client must not send concurrent `f` requests. Catalog revision

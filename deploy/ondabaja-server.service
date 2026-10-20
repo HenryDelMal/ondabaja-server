@@ -13,6 +13,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # Match server.output_root; revision state is stored inside that directory.
 ReadWritePaths=/opt/ondabaja-server/public
 ExecStart=/opt/ondabaja-server/.venv/bin/ondabaja-server serve --config /opt/ondabaja-server/server.local.toml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s

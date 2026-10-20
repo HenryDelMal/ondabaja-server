@@ -112,6 +112,22 @@ sudo systemctl enable --now ondabaja-server.service
 sudo journalctl -u ondabaja-server.service -f
 ```
 
+After adding, removing, or editing station TOML files, ask systemd to reload
+the station configuration without dropping the shared TCP listener or client
+sockets:
+
+```sh
+sudo systemctl reload ondabaja-server.service
+sudo journalctl -u ondabaja-server.service -n 30 --no-pager
+```
+
+The reload re-reads `server.toml` and station files, updates the HTTP/TCP
+catalog and station manifests, and sends connected clients the one-byte `u`
+notification. The client should refresh the catalog and reselect its current
+station on the same connection. Changing `server.host` or `server.port` still
+requires a service restart. If the new station configuration is invalid, the
+server logs the error and keeps the active configuration.
+
 `check` validates configuration, FFmpeg, and the native model loader; it does
 not fetch audio or prove sustained real-time encoding. Confirm each station
 publishes new segments after startup and test both TCP playback and HTTP

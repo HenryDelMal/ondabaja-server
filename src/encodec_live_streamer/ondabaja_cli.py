@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"concurrent publisher limit: {config.max_streams}")
             print("configuration: OK")
             return 0
-        OndaBajaService(config, streams).run()
+        OndaBajaService(config, streams, args.config).run()
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         logging.getLogger(__name__).error("%s", error)
