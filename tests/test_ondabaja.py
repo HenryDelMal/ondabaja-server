@@ -8,11 +8,13 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from encodec_live_streamer.config import Config
 from encodec_live_streamer.ecdc import make_test_ecdc
 from encodec_live_streamer.manifest import ManifestStore, crc32c
 from encodec_live_streamer.mux import OndaBajaTcpServer, Radio
+from encodec_live_streamer import mux
 from encodec_live_streamer.ondabaja import OndaBajaService, load_ondabaja_config
 from encodec_live_streamer.tcp import encode_varint, read_varint
 
@@ -46,6 +48,18 @@ def startup_response(sock):
     flags = exact(sock, 1)[0]
     segment = exact(sock, segment_length)
     return selection_id, manifest, sequence, checksum, flags, segment
+
+
+def burst_reply(sock):
+    kind = exact(sock, 1)
+    assert kind in (b'D', b'E')
+    burst_id, sequence = read_varint(sock), read_varint(sock)
+    if kind == b'E':
+        return kind, burst_id, sequence, exact(sock, 1)
+    size = read_varint(sock)
+    checksum = struct.unpack('>I', exact(sock, 4))[0]
+    flags = exact(sock, 1)[0]
+    return kind, burst_id, sequence, checksum, flags, exact(sock, size)
 
 
 class StationFolderTests(unittest.TestCase):
@@ -429,3 +443,227 @@ class StationFolderTests(unittest.TestCase):
                               if thread.name == 'ondabaja-mux-asyncio']), 1)
         for client in clients:
             self.assertEqual(exact(client, 1), b'h')
+
+
+class BurstTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def store(self, name, count=0, **options):
+        store = ManifestStore(Config(input='unused', codec='ECNG', fsync=False,
+            output_dir=self.root / name, segment_duration=1, **options),
+            segment_cache_enabled=False)
+        for _ in range(count):
+            self.publish(store)
+        return store
+
+    def publish(self, store):
+        samples = store.config.samples_per_segment
+        encoded = make_test_ecdc(samples, store.config.codebooks, store.config.model)
+        sequence = store.snapshot().next_sequence
+        store.publish_segment(encoded, sample_count=samples,
+            pts_samples=sequence * samples, program_date_time='2026-01-01T00:00:00Z',
+            epoch='burst', discontinuity=sequence == 0)
+        return encoded
+
+    def connect(self, *stores):
+        server = OndaBajaTcpServer('127.0.0.1', 0,
+            tuple(Radio(s.output_dir.name, s.output_dir.name, '', s) for s in stores),
+            1, wait_seconds=5)
+        server.start()
+        self.addCleanup(server.close)
+        client = socket.create_connection(server.address, timeout=2)
+        self.addCleanup(client.close)
+        client.settimeout(2)
+        station_id = stores[0].output_dir.name.encode()
+        client.sendall(b'R' + encode_varint(len(station_id)) + station_id)
+        self.assertEqual(payload(client, b'm'), stores[0].snapshot().manifest)
+        return client, server
+
+    def request(self, client, burst_id, sequence, count):
+        client.sendall(b'F' + encode_varint(burst_id) + encode_varint(sequence) +
+                       encode_varint(count))
+
+    def test_six_segments_are_tagged_and_individually_framed(self):
+        store = self.store('radio', 8)
+        client, _ = self.connect(store)
+        self.request(client, 130, 0, 6)
+        for sequence in range(6):
+            kind, burst_id, actual, checksum, flags, segment = burst_reply(client)
+            self.assertEqual((kind, burst_id, actual, flags),
+                             (b'D', 130, sequence, int(sequence == 0)))
+            self.assertEqual(checksum, crc32c(segment))
+            item = store.snapshot().retained_segments[sequence]
+            self.assertEqual(segment, (store.output_dir / item.uri).read_bytes())
+        self.assertEqual(burst_reply(client), (b'E', 130, 6, b'n'))
+        # Burst D frames are never the normal f/S retry target.
+        client.sendall(b'eH')
+        self.assertEqual(exact(client, 2), b'rh')
+        self.request(client, 131, 6, 6)
+        self.assertEqual(burst_reply(client)[:3], (b'D', 131, 6))
+        self.assertEqual(burst_reply(client)[:3], (b'D', 131, 7))
+        self.assertEqual(burst_reply(client), (b'E', 131, 8, b'n'))
+
+    def test_empty_future_stale_and_missing_file_end_without_polling(self):
+        empty = self.store('empty')
+        client, _ = self.connect(empty)
+        started = time.monotonic()
+        self.request(client, 1, 0, 6)
+        self.assertEqual(burst_reply(client), (b'E', 1, 0, b'n'))
+        self.assertLess(time.monotonic() - started, 0.5)
+        store = self.store('retained', 4, window_segments=2, stale_grace_segments=0)
+        client, _ = self.connect(store)
+        for burst_id, sequence, status in ((2, 0, b'g'), (3, 100, b'n')):
+            self.request(client, burst_id, sequence, 6)
+            self.assertEqual(burst_reply(client), (b'E', burst_id, sequence, status))
+        (store.output_dir / store.snapshot().retained_segments[3].uri).unlink()
+        self.request(client, 4, 2, 6)
+        self.assertEqual(burst_reply(client)[:3], (b'D', 4, 2))
+        self.assertEqual(burst_reply(client), (b'E', 4, 3, b'g'))
+
+    def test_snapshot_excludes_publications_during_burst(self):
+        store = self.store('snapshot', 1)
+        original = mux._segment_frame
+
+        async def publish_during_read(current_store, item, snapshot=None):
+            frame = await original(current_store, item, snapshot)
+            self.publish(current_store)
+            return frame
+
+        with patch.object(mux, '_segment_frame', publish_during_read):
+            client, _ = self.connect(store)
+            self.request(client, 1, 0, 6)
+            self.assertEqual(burst_reply(client)[:3], (b'D', 1, 0))
+            self.assertEqual(burst_reply(client), (b'E', 1, 1, b'n'))
+        self.request(client, 2, 1, 1)
+        self.assertEqual(burst_reply(client)[:3], (b'D', 2, 1))
+        self.assertEqual(burst_reply(client), (b'E', 2, 2, b'n'))
+
+    def test_first_segment_streams_before_slow_disk_read_and_b_supersedes(self):
+        old, new = self.store('old', 2), self.store('new', 1)
+        entered, release = threading.Event(), threading.Event()
+        item = old.snapshot().retained_segments[1]
+        blocked_path = old.output_dir / item.uri
+        original_read = Path.read_bytes
+
+        def slow_disk(path):
+            if path == blocked_path:
+                entered.set()
+                release.wait(3)
+            return original_read(path)
+
+        with patch.object(Path, 'read_bytes', slow_disk):
+            client, _ = self.connect(old, new)
+            self.request(client, 7, 0, 6)
+            self.assertEqual(burst_reply(client)[:3], (b'D', 7, 0))
+            try:
+                self.assertTrue(entered.wait(1))
+                client.sendall(b'H')
+                self.assertEqual(exact(client, 1), b'h')
+                started = time.monotonic()
+                client.sendall(b'B' + encode_varint(99) + b'\x03new' + encode_varint(30000))
+                response = startup_response(client)
+                self.assertEqual(response[:3], (99, new.snapshot().manifest, 0))
+                self.assertLess(time.monotonic() - started, 0.5)
+                client.sendall(b'H')
+                self.assertEqual(exact(client, 1), b'h')
+            finally:
+                release.set()
+        # The abandoned disk read must never send old D/E afterward.
+        client.sendall(b'M')
+        self.assertEqual(payload(client, b'm'), new.snapshot().manifest)
+
+    def test_r_and_q_interrupt_segment_preparation(self):
+        original = mux._segment_frame
+        for command in (b'R\x03new', b'Q'):
+            with self.subTest(command=command):
+                entered = threading.Event()
+                old = self.store('old-' + str(command[0]), 1)
+                new = self.store('new', 1)
+
+                async def blocked(current_store, item, snapshot=None):
+                    if current_store is old:
+                        entered.set()
+                        await asyncio.Event().wait()
+                    return await original(current_store, item, snapshot)
+
+                with patch.object(mux, '_segment_frame', blocked):
+                    client, _ = self.connect(old, new)
+                    self.request(client, 1, 0, 1)
+                    self.assertTrue(entered.wait(1))
+                    client.sendall(command)
+                    if command == b'Q':
+                        self.assertEqual(client.recv(1), b'')
+                    else:
+                        self.assertEqual(payload(client, b'm'), new.snapshot().manifest)
+                        client.sendall(b'H')
+                        self.assertEqual(exact(client, 1), b'h')
+
+    def test_invalid_burst_fields_close_connection(self):
+        store = self.store('validation')
+        for fields in ((0, 0, 1), (1, 0, 0), (1, 0, 7)):
+            with self.subTest(fields=fields):
+                client, _ = self.connect(store)
+                self.request(client, *fields)
+                self.assertEqual(client.recv(1), b'')
+        client, _ = self.connect(store)
+        client.sendall(b'F\x81\x00\x00\x01')  # Noncanonical burst ID.
+        self.assertEqual(client.recv(1), b'')
+
+    def test_new_b_selection_supersedes_older_preparation(self):
+        old, new = self.store('old', 1), self.store('new', 1)
+        client, server = self.connect(old, new)
+        entered = threading.Event()
+        original = server._startup_response
+
+        async def blocked(radio, selection_id, lookback_ms):
+            if selection_id == 1:
+                entered.set()
+                await asyncio.Event().wait()
+            return await original(radio, selection_id, lookback_ms)
+
+        server._startup_response = blocked
+        client.sendall(b'B\x01\x03old' + encode_varint(30000))
+        self.assertTrue(entered.wait(1))
+        client.sendall(b'B\x02\x03new' + encode_varint(30000))
+        self.assertEqual(startup_response(client)[:3], (2, new.snapshot().manifest, 0))
+        client.sendall(b'H')
+        self.assertEqual(exact(client, 1), b'h')
+
+    def test_selection_interrupts_socket_drain_after_one_complete_data_frame(self):
+        old, new = self.store('draining', 6), self.store('selected', 1)
+        server = OndaBajaTcpServer('127.0.0.1', 0,
+            (Radio('draining', 'Old', '', old), Radio('selected', 'New', '', new)), 1)
+
+        async def exercise():
+            reader = asyncio.StreamReader()
+            draining = asyncio.Event()
+            frames = []
+
+            class SlowWriter:
+                def write(self, frame):
+                    frames.append(frame)
+
+                async def drain(self):
+                    if frames[-1].startswith(b'D'):
+                        draining.set()
+                        await asyncio.Event().wait()
+
+            burst = asyncio.create_task(server._burst(
+                reader, SlowWriter(), server.radios[0], 77, 0, 6))
+            try:
+                await asyncio.wait_for(draining.wait(), 1)
+                reader.feed_data(b'B\x7b\x08selected' + encode_varint(30000))
+                selected = await asyncio.wait_for(burst, 1)
+                self.assertEqual(selected.id, 'selected')
+                self.assertEqual(len(frames), 2)
+                self.assertTrue(frames[0].startswith(b'D' + encode_varint(77) + b'\x00'))
+                self.assertTrue(frames[1].startswith(b'B' + encode_varint(123)))
+            finally:
+                if not burst.done():
+                    burst.cancel()
+                await asyncio.gather(burst, return_exceptions=True)
+
+        asyncio.run(exercise())

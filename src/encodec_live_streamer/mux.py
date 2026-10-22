@@ -16,6 +16,7 @@ MAX_CATALOG_BYTES = 256 * 1024
 MAX_STATION_ID_BYTES = 128
 _CATALOG_RELOADED = object()
 _CLOSE_CONNECTION = object()
+_BURST_COMPLETE = object()
 
 
 def _pb_uint(field: int, value: int) -> bytes:
@@ -321,6 +322,79 @@ class OndaBajaTcpServer:
         return await self._startup_exchange(reader, writer, radio, selection_id,
                                             lookback_ms or 0)
 
+    async def _burst(self, reader, writer, radio: Radio, burst_id: int,
+                     sequence: int, max_segments: int):
+        """Stream a bounded snapshot batch, allowing selections during disk I/O/drain."""
+        snapshot = radio.store.snapshot()
+        incoming = asyncio.create_task(reader.read(1))
+
+        async def step(make_operation):
+            nonlocal incoming
+            operation = None
+            try:
+                while True:
+                    # Give buffered station changes priority before another D/E.
+                    await asyncio.sleep(0)
+                    if incoming.done():
+                        command = incoming.result()
+                        if command == b"H":
+                            await asyncio.wait_for(_write(writer, b"h"), self.idle_timeout)
+                            incoming = asyncio.create_task(reader.read(1))
+                            continue
+                        if operation is not None:
+                            operation.cancel()
+                            await asyncio.gather(operation, return_exceptions=True)
+                        if not command or command in (b"Q", b"q"):
+                            return False, _CLOSE_CONNECTION
+                        if command in (b"B", b"R"):
+                            return False, await self._read_station_request(reader, writer, command)
+                        raise ValueError("only B, R, H, or Q may interrupt F")
+                    if operation is None:
+                        operation = asyncio.create_task(make_operation())
+                    if operation.done():
+                        return True, operation.result()
+                    await asyncio.wait((operation, incoming),
+                                       return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                if operation is not None:
+                    if not operation.done():
+                        operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+
+        async def send(frame):
+            return await step(lambda: asyncio.wait_for(
+                _write(writer, frame), self.idle_timeout))
+
+        try:
+            status = b"n"
+            for _ in range(max_segments):
+                if sequence >= snapshot.next_sequence:
+                    break
+                item = snapshot.retained_segments.get(sequence)
+                if item is None:
+                    status = b"g"
+                    break
+                completed, frame = await step(
+                    lambda: _segment_frame(radio.store, item, snapshot))
+                if not completed:
+                    return frame
+                if frame is None:
+                    status = b"g"
+                    break
+                completed, result = await send(
+                    b"D" + encode_varint(burst_id) + encode_varint(sequence) + frame[1:])
+                if not completed:
+                    return result
+                del frame
+                sequence += 1
+            completed, result = await send(
+                b"E" + encode_varint(burst_id) + encode_varint(sequence) + status)
+            return _BURST_COMPLETE if completed else result
+        finally:
+            if not incoming.done():
+                incoming.cancel()
+            await asyncio.gather(incoming, return_exceptions=True)
+
     async def _fetch(self, reader, writer, radio: Radio, sequence: int,
                      catalog_changed: asyncio.Event):
         loop = asyncio.get_running_loop()
@@ -565,6 +639,22 @@ class OndaBajaTcpServer:
                         last_frame = None
                     else:
                         last_frame = frame
+                elif command == b"F":
+                    burst_id = await _read_varint(reader, self.idle_timeout)
+                    sequence = await _read_varint(reader, self.idle_timeout)
+                    max_segments = await _read_varint(reader, self.idle_timeout)
+                    if burst_id == 0 or not 1 <= max_segments <= 6:
+                        raise ValueError("F requires positive burst ID and 1..6 segments")
+                    last_frame = None
+                    if radio is None:
+                        await _write(writer, b"x")
+                        continue
+                    selected = await self._burst(
+                        reader, writer, radio, burst_id, sequence, max_segments)
+                    if selected is _CLOSE_CONNECTION:
+                        return
+                    if selected is not _BURST_COMPLETE:
+                        radio = selected
                 elif command == b"e":
                     await _write(writer, last_frame if last_frame is not None else b"r")
                 elif command == b"H":

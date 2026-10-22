@@ -19,6 +19,7 @@ Commands are:
 | `B` | positive selection ID varint + station-ID byte-length varint + UTF-8 station ID + startup-lookback milliseconds varint | bundled manifest and first startup segment, or `n`; switches this socket |
 | `M` | none | current selected station's framed `m` manifest |
 | `f` | absolute sequence varint | `S`, `g`, or `n` using existing ELTCP v1 rules |
+| `F` | positive burst-ID varint + absolute start-sequence varint + max-segments varint (1..6) | zero or more tagged `D` frames, then tagged `E` |
 | `e` | none | retry the previous complete `S` frame |
 | `H` | none | `h` liveness echo |
 | `Q` | none | close |
@@ -58,6 +59,41 @@ read the complete `B` request, the bundled response supersedes the pending
 fetch; no `S` or `n` response for that old fetch is sent. The server builds the
 whole bundle before writing it, so its manifest and segment framing remain
 contiguous as one response.
+
+`F` retrieves audio already available in one immutable publication snapshot.
+Its exact request is ASCII `F` + UVARINT(burst_id) + UVARINT(start_sequence)
+followed by UVARINT(max_segments). Burst IDs must be positive; the limit must be 1..6.
+Invalid fields, noncanonical integers, or uint64 overflow close the connection.
+Without a selected station the response is `x`, as for `f`.
+
+Each data response is ASCII `D` + UVARINT(burst_id) +
+UVARINT(absolute_sequence) + UVARINT(ecng_length) + uint32 CRC32C in big-endian
+order + uint8 flags + exactly ecng_length ECNG bytes. Only flags bit 0
+(discontinuity) is defined. There is no embedded `S` marker. The server sends
+consecutive retained sequences, at most the requested limit, writing and
+draining each complete `D` immediately. Clients can decode each segment as it
+arrives. Per-client preparation holds one segment at a time; it never assembles
+the whole batch. Cached snapshot frames are shared between clients.
+
+The terminal response is ASCII `E` + UVARINT(burst_id) +
+UVARINT(next_sequence) + one ASCII status byte. Status `n` means the batch ended,
+including an empty batch, the snapshot edge, a future start sequence, or the
+requested limit. Status `g` means next_sequence is stale or unavailable,
+including a missing retained file. next_sequence is the first sequence not sent.
+Publications after the snapshot belong to a subsequent request. `F` never waits
+for publication; use existing `f` to wait at the live edge, with unchanged
+heartbeat and timeout behavior.
+
+During `F`, `H` receives `h`, `Q` closes, and `B`/`R` supersede the burst on the
+same connection, including while an uncached file is being read or the socket
+is draining. The replaced burst may omit `E`. Already queued complete `D`/`E`
+frames can precede a selection response; clients must drain and discard frames
+tagged with obsolete burst IDs. A `B` received during another `B` preparation
+supersedes the older selection; identical retries share the selection ID and
+can be satisfied by the pending response. Clients reconnect after malformed
+`D` or CRC failure; `e` retries only the normal `f`/`S` response. `F` clears that
+retry target. Only one fetch or burst is active per socket. Both peers must
+implement this extension; there is no negotiation or automatic version fallback.
 
 After a successful configuration reload, the server sends `u` to every
 currently connected client. It may arrive while a client is waiting for a
