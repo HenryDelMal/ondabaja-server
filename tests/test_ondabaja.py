@@ -667,3 +667,80 @@ class BurstTests(unittest.TestCase):
                 await asyncio.gather(burst, return_exceptions=True)
 
         asyncio.run(exercise())
+
+    def test_completed_b_retry_followed_by_f_never_prepares_or_retunes(self):
+        for delay in (0, 0.05):
+            with self.subTest(preparation_delay=delay):
+                store = self.store('duplicate-' + str(delay), 1)
+                client, server = self.connect(store)
+                original = server._startup_response
+                calls = []
+
+                async def delayed(radio, selection_id, lookback):
+                    calls.append(selection_id)
+                    await asyncio.sleep(delay)
+                    return await original(radio, selection_id, lookback)
+
+                server._startup_response = delayed
+                station = store.output_dir.name.encode()
+                request = b'B\x01' + encode_varint(len(station)) + station + encode_varint(30000)
+                client.sendall(request)
+                manifest = startup_response(client)[1]
+                # A later snapshot must not be used to recompute the same ID.
+                self.publish(store)
+                self.assertNotEqual(manifest, store.snapshot().manifest)
+                client.sendall(request + b'F\x07\x01\x01')
+                self.assertEqual(burst_reply(client)[:3], (b'D', 7, 1))
+                self.assertEqual(burst_reply(client), (b'E', 7, 2, b'n'))
+                self.assertEqual(calls, [1])
+                client.sendall(b'H')
+                self.assertEqual(exact(client, 1), b'h')
+
+    def test_obsolete_b_ids_do_not_change_newer_station_or_interrupt_burst(self):
+        old, new = self.store('obsolete', 1), self.store('current', 2)
+        client, _ = self.connect(old, new)
+        request_old = b'B\x01\x08obsolete' + encode_varint(30000)
+        client.sendall(request_old)
+        self.assertEqual(startup_response(client)[0], 1)
+        client.sendall(b'B\x02\x07current' + encode_varint(30000))
+        self.assertEqual(startup_response(client)[0], 2)
+        client.sendall(request_old + b'M')
+        self.assertEqual(payload(client, b'm'), new.snapshot().manifest)
+        # The latest completed ID is also ignored while F reads a segment.
+        entered = threading.Event()
+        original = mux._segment_frame
+
+        async def delayed(store, item, snapshot=None):
+            entered.set()
+            await asyncio.sleep(0.05)
+            return await original(store, item, snapshot)
+
+        with patch.object(mux, '_segment_frame', delayed):
+            self.request(client, 9, 1, 1)
+            self.assertTrue(entered.wait(1))
+            client.sendall(b'B\x02\x07current' + encode_varint(30000))
+            self.assertEqual(burst_reply(client)[:3], (b'D', 9, 1))
+            self.assertEqual(burst_reply(client), (b'E', 9, 2, b'n'))
+
+    def test_conflicting_latest_b_id_is_rejected_pending_or_completed(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                store = self.store('conflict-' + str(pending), 1)
+                client, server = self.connect(store)
+                entered = threading.Event()
+
+                async def blocked(radio, selection_id, lookback):
+                    entered.set()
+                    await asyncio.Event().wait()
+
+                if pending:
+                    server._startup_response = blocked
+                station = store.output_dir.name.encode()
+                prefix = b'B\x01' + encode_varint(len(station)) + station
+                client.sendall(prefix + encode_varint(30000))
+                if pending:
+                    self.assertTrue(entered.wait(1))
+                else:
+                    self.assertEqual(startup_response(client)[0], 1)
+                client.sendall(prefix + encode_varint(1))
+                self.assertEqual(client.recv(1), b'')

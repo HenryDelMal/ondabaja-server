@@ -17,6 +17,25 @@ MAX_STATION_ID_BYTES = 128
 _CATALOG_RELOADED = object()
 _CLOSE_CONNECTION = object()
 _BURST_COMPLETE = object()
+_SELECTION_IGNORED = object()
+
+
+@dataclasses.dataclass
+class _SelectionState:
+    latest_id: int = 0
+    identity: tuple[bytes, int] | None = None
+    completed: bool = False
+
+    def accept(self, selection_id: int, station: bytes, lookback: int) -> bool:
+        if selection_id < self.latest_id:
+            return False
+        identity = (station, lookback)
+        if selection_id == self.latest_id:
+            if identity != self.identity:
+                raise ValueError("selection ID reused with conflicting parameters")
+            return not self.completed
+        self.latest_id, self.identity, self.completed = selection_id, identity, False
+        return True
 
 
 def _pb_uint(field: int, value: int) -> bytes:
@@ -234,7 +253,8 @@ class OndaBajaTcpServer:
         return raw_id, selection_id, lookback_ms
 
     async def _startup_exchange(self, reader, writer, radio: Radio,
-                                selection_id: int, lookback_ms: int) -> Radio | object:
+                                selection_id: int, lookback_ms: int,
+                                selections: _SelectionState) -> Radio | object:
         """Prepare B while still accepting a same-socket retry or switch."""
         request_id = selection_id
         request_station = radio.id
@@ -263,6 +283,7 @@ class OndaBajaTcpServer:
                         preparation.cancel()
                         await asyncio.gather(preparation, return_exceptions=True)
                         raw_id, _, _ = await self._read_station_request_data(reader, command)
+                        selections.completed = True
                         return await self._select_radio(writer, raw_id)
                     if command != b"B":
                         raise ValueError("only B, R, H, or Q may interrupt B preparation")
@@ -270,6 +291,9 @@ class OndaBajaTcpServer:
                     raw_id, retry_id, retry_lookback = await self._read_station_request_data(
                         reader, command)
                     station_id = raw_id.decode("utf-8")
+                    if not selections.accept(retry_id, raw_id, retry_lookback):
+                        incoming = asyncio.create_task(reader.read(1))
+                        continue
                     if (retry_id == request_id and station_id == request_station
                             and retry_lookback == request_lookback):
                         # The in-flight response satisfies this retry because
@@ -282,6 +306,7 @@ class OndaBajaTcpServer:
                     radio = self.radios_by_id.get(station_id)
                     if radio is None:
                         await _write(writer, b"x")
+                        selections.completed = True
                         return None
                     request_id = retry_id
                     request_station = station_id
@@ -297,6 +322,7 @@ class OndaBajaTcpServer:
                     await asyncio.gather(incoming, return_exceptions=True)
                     incoming = None
                 await _write(writer, response)
+                selections.completed = True
                 return radio
         finally:
             if not preparation.done():
@@ -308,24 +334,33 @@ class OndaBajaTcpServer:
                 await asyncio.gather(incoming, return_exceptions=True)
 
     async def _read_station_request(self, reader, writer,
-                                    command: bytes) -> Radio | object | None:
+                                    command: bytes, selections: _SelectionState,
+                                    cancel_pending=None) -> Radio | object | None:
         raw_id, selection_id, lookback_ms = await self._read_station_request_data(
             reader, command)
+        if command == b"B" and not selections.accept(selection_id, raw_id, lookback_ms):
+            return _SELECTION_IGNORED
+        if cancel_pending is not None:
+            await cancel_pending()
         if command == b"R":
+            selections.completed = True
             return await self._select_radio(writer, raw_id)
 
         station_id = raw_id.decode("utf-8")
         radio = self.radios_by_id.get(station_id)
         if radio is None:
             await _write(writer, b"x")
+            selections.completed = True
             return None
         return await self._startup_exchange(reader, writer, radio, selection_id,
-                                            lookback_ms or 0)
+                                            lookback_ms or 0, selections)
 
     async def _burst(self, reader, writer, radio: Radio, burst_id: int,
-                     sequence: int, max_segments: int):
+                     sequence: int, max_segments: int, selections=None):
         """Stream a bounded snapshot batch, allowing selections during disk I/O/drain."""
         snapshot = radio.store.snapshot()
+        if selections is None:
+            selections = _SelectionState()
         incoming = asyncio.create_task(reader.read(1))
 
         async def step(make_operation):
@@ -341,13 +376,20 @@ class OndaBajaTcpServer:
                             await asyncio.wait_for(_write(writer, b"h"), self.idle_timeout)
                             incoming = asyncio.create_task(reader.read(1))
                             continue
-                        if operation is not None:
-                            operation.cancel()
-                            await asyncio.gather(operation, return_exceptions=True)
+                        async def cancel_pending():
+                            if operation is not None:
+                                operation.cancel()
+                                await asyncio.gather(operation, return_exceptions=True)
                         if not command or command in (b"Q", b"q"):
+                            await cancel_pending()
                             return False, _CLOSE_CONNECTION
                         if command in (b"B", b"R"):
-                            return False, await self._read_station_request(reader, writer, command)
+                            selected = await self._read_station_request(
+                                reader, writer, command, selections, cancel_pending)
+                            if selected is _SELECTION_IGNORED:
+                                incoming = asyncio.create_task(reader.read(1))
+                                continue
+                            return False, selected
                         raise ValueError("only B, R, H, or Q may interrupt F")
                     if operation is None:
                         operation = asyncio.create_task(make_operation())
@@ -396,7 +438,7 @@ class OndaBajaTcpServer:
             await asyncio.gather(incoming, return_exceptions=True)
 
     async def _fetch(self, reader, writer, radio: Radio, sequence: int,
-                     catalog_changed: asyncio.Event):
+                     catalog_changed: asyncio.Event, selections: _SelectionState):
         loop = asyncio.get_running_loop()
         changed = asyncio.Event()
 
@@ -426,7 +468,11 @@ class OndaBajaTcpServer:
                 incoming_deadline = loop.time() + self.idle_timeout
                 return "continue", None
             if command in (b"R", b"B"):
-                selected = await self._read_station_request(reader, writer, command)
+                selected = await self._read_station_request(reader, writer, command, selections)
+                if selected is _SELECTION_IGNORED:
+                    incoming = asyncio.create_task(reader.read(1))
+                    incoming_deadline = loop.time() + self.idle_timeout
+                    return "continue", None
                 if selected is _CLOSE_CONNECTION:
                     return "close", None
                 return "selected", selected
@@ -587,6 +633,7 @@ class OndaBajaTcpServer:
         peer = writer.get_extra_info("peername")
         radio: Radio | None = None
         last_frame: bytes | None = None
+        selections = _SelectionState()
         try:
             while not self._stopping.is_set():
                 command_read = asyncio.create_task(self._read_exactly(reader, 1))
@@ -609,7 +656,9 @@ class OndaBajaTcpServer:
                 if command in (b"Q", b"q"):
                     return
                 if command in (b"R", b"B"):
-                    selected = await self._read_station_request(reader, writer, command)
+                    selected = await self._read_station_request(reader, writer, command, selections)
+                    if selected is _SELECTION_IGNORED:
+                        continue
                     if selected is _CLOSE_CONNECTION:
                         return
                     if selected is not None:
@@ -629,7 +678,7 @@ class OndaBajaTcpServer:
                         await _write(writer, b"x")
                         continue
                     selected, frame, close = await self._fetch(
-                        reader, writer, radio, sequence, catalog_changed)
+                        reader, writer, radio, sequence, catalog_changed, selections)
                     if close:
                         return
                     if selected is _CATALOG_RELOADED:
@@ -650,7 +699,7 @@ class OndaBajaTcpServer:
                         await _write(writer, b"x")
                         continue
                     selected = await self._burst(
-                        reader, writer, radio, burst_id, sequence, max_segments)
+                        reader, writer, radio, burst_id, sequence, max_segments, selections)
                     if selected is _CLOSE_CONNECTION:
                         return
                     if selected is not _BURST_COMPLETE:

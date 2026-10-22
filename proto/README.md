@@ -40,11 +40,17 @@ big-endian CRC32C, one flags byte, and the exact ECNG bytes). There is no
 additional `S` marker before the segment length. For an unknown station the
 reply is the single byte `x`. A client may retry the same `B` request with the
 same selection ID on the same open socket. The server recognizes a retry while
-the response is being prepared and lets the pending response satisfy it. If a
-retry arrives after that response was sent, it is a new request and its reply
-contains the same selection ID; clients can ignore already-consumed IDs.
+the response is being prepared and lets the pending response satisfy it. Once
+completed, an identical retry is consumed without preparing or sending another
+response: the original response is already queued on reliable TCP. It does not
+select again, change the snapshot, or interrupt a subsequent `F`/`f` request.
 Selection IDs are positive uint64 values echoed to correlate replies with the
-current station-selection attempt.
+current station-selection attempt and must increase for each new selection on
+the same connection. The server retains only the latest ID, its station and
+lookback parameters, and completion state. Reusing that latest ID with different
+parameters closes the connection, whether preparation is pending or completed.
+Lower IDs are consumed and ignored, including during a newer pending selection;
+they can never change the selected station. This state is reset on reconnect.
 
 The startup segment is chosen from the same immutable manifest snapshot in the
 response. Starting at the newest segment, walk backward until accumulated
