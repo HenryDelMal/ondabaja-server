@@ -1,9 +1,9 @@
 # ECNG encoder models
 
-Current export: `ECNG best checkpoint 1,870,000 from ECNG training 4090`.
+Current export: `ECNG training 4090 completed checkpoint at step 2,000,000`.
 
 The active encoder is `ecng-24khz-encoder-f32.bin` (SHA-256
-`6073d408c32389db1761e87fe7818dc8541d7028645f7c2845655d7c227a65c8`).
+`6488da31661c0dfba2f2b3e3ce2e73ccfb56ed643be9e47137d66d949882e80b`).
 `manifest.json` records the export and matching decoder checksums.
 
 The root `server.toml` sets `stream_defaults.model_dir = "models"`.

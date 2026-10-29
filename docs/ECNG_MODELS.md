@@ -10,15 +10,15 @@ and model identifier `ecng_24khz`, retaining the existing ELTCP S framing.
 Encoder and decoder weights must come from the matching export. A shared
 filename or model identifier does not establish checkpoint compatibility.
 
-The active export is the **ECNG training 4090 best checkpoint at step 1,870,000**. Its source SHA-256 is `bc933fad9eaee2f437cf23d3411890bdf2ef89d11d26cc73dc2148b61266fc14`. Encoder and decoder artifacts below were regenerated together from that exact checkpoint.
+The active export is the **ECNG training 4090 completed checkpoint at step 2,000,000**. Its source SHA-256 is `cb37b0efc647f52ee7db269490be51e4734d925c4c78b1f332729a0b361e847f`. This is the final resume checkpoint; its stored `best_validation` value records the earlier best at step 1,870,000 and is not a score for these final-step weights. Encoder and decoder artifacts below were regenerated together from the step-2,000,000 model state.
 
 | Artifact | Bytes | SHA-256 |
 | --- | ---: | --- |
-| Server encoder FP32 | 31,791,080 | `6073d408c32389db1761e87fe7818dc8541d7028645f7c2845655d7c227a65c8` |
-| Android decoder FP32 | 33,981,819 | `90519de8f4e80c7f1d957c51893b5ead14bdbfedd06e58556c7c0653189fbd69` |
-| Android decoder FP16 | 16,992,703 | `8921cd95a871eea1bdd1336daa674bb5899c58f5583fbe0c0712210c93b008ff` |
-| Android decoder INT8 | 10,049,239 | `f881e6845f85aff2e5793e049f68ffdfe4a1fc37fc3cb6d133c819449dee012b` |
-| Android decoder INT4 | 6,081,367 | `d6791817bbfbb1617ba7565c60fdcc2d6bf048afc3266b0333fa495614ceda57` |
+| Server encoder FP32 | 31,791,080 | `6488da31661c0dfba2f2b3e3ce2e73ccfb56ed643be9e47137d66d949882e80b` |
+| Android decoder FP32 | 33,981,819 | `e7c3334922103a61482bb3e9b46dbfa9ff0692cb1723bff3121f9dd201a65a45` |
+| Android decoder FP16 | 16,992,703 | `4dce030e612bd360ecb30435bde8708764fbfa239f30e52343bce90e2b3dbf80` |
+| Android decoder INT8 | 10,049,239 | `c1654d8fa913a5904a8147a2aa3546342ee548c1414e71914a40d90eee9eccb9` |
+| Android decoder INT4 | 6,081,367 | `b7150d9dceb9009cf1f529ff1d4450d66802fb1c619b83b475ae8fcd0f361e6e` |
 
 The encoder and decoder RVQ weights are checkpoint-specific and must be deployed as a matched set. The new encoder is ignored by Git and must be included in the server deployment package. Existing published segments created with older encoder weights must not be mixed with segments created by this checkpoint.
 

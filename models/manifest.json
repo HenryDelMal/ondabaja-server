@@ -1,7 +1,8 @@
 {
-  "training_step": 1870000,
-  "source_checkpoint": "ECNG training 4090 / work/checkpoint-backups/4090-baseline/codec-best.pt",
-  "checkpoint_sha256": "bc933fad9eaee2f437cf23d3411890bdf2ef89d11d26cc73dc2148b61266fc14",
+  "training_step": 2000000,
+  "checkpoint_role": "completed final resume checkpoint; the stored best_validation score is historical and does not score these final-step weights",
+  "source_checkpoint": "ECNG training 4090 / work/checkpoint-backups/4090-baseline/resume-step-002000000.pt",
+  "checkpoint_sha256": "cb37b0efc647f52ee7db269490be51e4734d925c4c78b1f332729a0b361e847f",
   "profile": {
     "sample_rate": 24000,
     "channels": 1,
@@ -15,29 +16,29 @@
   "artifacts": {
     "ecng-24khz-encoder-f32.bin": {
       "bytes": 31791080,
-      "sha256": "6073d408c32389db1761e87fe7818dc8541d7028645f7c2845655d7c227a65c8",
+      "sha256": "6488da31661c0dfba2f2b3e3ce2e73ccfb56ed643be9e47137d66d949882e80b",
       "precision": "FP32"
     },
     "ecng-24khz-decoder-fp32.bin": {
       "bytes": 33981819,
-      "sha256": "90519de8f4e80c7f1d957c51893b5ead14bdbfedd06e58556c7c0653189fbd69",
+      "sha256": "e7c3334922103a61482bb3e9b46dbfa9ff0692cb1723bff3121f9dd201a65a45",
       "precision": "FP32"
     },
     "ecng-24khz-decoder-fp16.bin": {
       "bytes": 16992703,
-      "sha256": "8921cd95a871eea1bdd1336daa674bb5899c58f5583fbe0c0712210c93b008ff",
+      "sha256": "4dce030e612bd360ecb30435bde8708764fbfa239f30e52343bce90e2b3dbf80",
       "precision": "FP16"
     },
     "ecng-24khz-decoder-int8.bin": {
       "bytes": 10049239,
-      "sha256": "f881e6845f85aff2e5793e049f68ffdfe4a1fc37fc3cb6d133c819449dee012b",
+      "sha256": "c1654d8fa913a5904a8147a2aa3546342ee548c1414e71914a40d90eee9eccb9",
       "precision": "INT8"
     },
     "ecng-24khz-decoder-int4.bin": {
       "bytes": 6081367,
-      "sha256": "d6791817bbfbb1617ba7565c60fdcc2d6bf048afc3266b0333fa495614ceda57",
+      "sha256": "b7150d9dceb9009cf1f529ff1d4450d66802fb1c619b83b475ae8fcd0f361e6e",
       "precision": "INT4",
-      "derived_from": "ECNG best checkpoint 1,870,000 using export_ecng.py groupwise symmetric quantization"
+      "derived_from": "step-002000000 model weights using export_ecng.py groupwise symmetric quantization"
     }
   }
 }
