@@ -89,7 +89,7 @@ with independent connections and station selections. Every configured radio
 has one shared ECNG encoder and FFmpeg input.
 
 The active encoder is in `models/ecng-24khz-encoder-f32.bin`. Its current export
-is **radio-finetune-v1-step-000100000**; see `models/manifest.json` for encoder
+is **ECNG best checkpoint 1,870,000 from ECNG training 4090**; see `models/manifest.json` for encoder
 and decoder checksums. Future exports can replace the active model without
 changing its filename or the station TOMLs. Clients need the matching decoder.
 The previous bundled encoder was preserved under `models/archive/`.

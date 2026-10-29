@@ -1,9 +1,9 @@
 # ECNG encoder models
 
-Current export: `radio-finetune-v1-step-000100000`.
+Current export: `ECNG best checkpoint 1,870,000 from ECNG training 4090`.
 
 The active encoder is `ecng-24khz-encoder-f32.bin` (SHA-256
-`cb3b155ce06fc90f7e44de3451dce229b927530d29b023d73e5be21f448dfb63`).
+`6073d408c32389db1761e87fe7818dc8541d7028645f7c2845655d7c227a65c8`).
 `manifest.json` records the export and matching decoder checksums.
 
 The root `server.toml` sets `stream_defaults.model_dir = "models"`.

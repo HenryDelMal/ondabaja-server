@@ -10,19 +10,17 @@ and model identifier `ecng_24khz`, retaining the existing ELTCP S framing.
 Encoder and decoder weights must come from the matching export. A shared
 filename or model identifier does not establish checkpoint compatibility.
 
-The EnCodec Live Streamer chat records deployment of the following export on
-October 20, 2026: `radio-finetune-v1-step-000100000`.
+The active export is the **ECNG training 4090 best checkpoint at step 1,870,000**. Its source SHA-256 is `bc933fad9eaee2f437cf23d3411890bdf2ef89d11d26cc73dc2148b61266fc14`. Encoder and decoder artifacts below were regenerated together from that exact checkpoint.
 
-| Artifact | SHA-256 |
-| --- | --- |
-| Encoder FP32 | `cb3b155ce06fc90f7e44de3451dce229b927530d29b023d73e5be21f448dfb63` |
-| Android decoder FP16 | `77c56a4e2f7b3b7b2eacbc6cfc4c3286726d387444ed21972e7190cde5355918` |
-| Android decoder INT8 | `bd3b9b2a9105ddaf46fc592a4733b91b8859fba84360d330b673780390a23549` |
+| Artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| Server encoder FP32 | 31,791,080 | `6073d408c32389db1761e87fe7818dc8541d7028645f7c2845655d7c227a65c8` |
+| Android decoder FP32 | 33,981,819 | `90519de8f4e80c7f1d957c51893b5ead14bdbfedd06e58556c7c0653189fbd69` |
+| Android decoder FP16 | 16,992,703 | `8921cd95a871eea1bdd1336daa674bb5899c58f5583fbe0c0712210c93b008ff` |
+| Android decoder INT8 | 10,049,239 | `f881e6845f85aff2e5793e049f68ffdfe4a1fc37fc3cb6d133c819449dee012b` |
+| Android decoder INT4 | 6,081,367 | `d6791817bbfbb1617ba7565c60fdcc2d6bf048afc3266b0333fa495614ceda57` |
 
-The active encoder in this checkout is now the export listed above. Its
-source manifest is preserved in `models/manifest.json`. The previous bundled
-encoder (`5e2555dd08c18c114e1611777a1bc8fa337552279bcafb88de93d013e65a3f77`)
-is retained under `models/archive/`.
+The encoder and decoder RVQ weights are checkpoint-specific and must be deployed as a matched set. The new encoder is ignored by Git and must be included in the server deployment package. Existing published segments created with older encoder weights must not be mixed with segments created by this checkpoint.
 
 `stream_defaults.model_dir` in the root `server.toml` selects the shared model
 folder. Future exports replace the conventional encoder filename and manifest;

@@ -1,31 +1,43 @@
 {
-  "training_step": 100000,
-  "source_checkpoint": "/Users/henry/Documents/ChatGPT/EnCodec/training/vast_joint/checkpoints/radio24-v2-finetune-v1/latest.pt",
+  "training_step": 1870000,
+  "source_checkpoint": "ECNG training 4090 / work/checkpoint-backups/4090-baseline/codec-best.pt",
+  "checkpoint_sha256": "bc933fad9eaee2f437cf23d3411890bdf2ef89d11d26cc73dc2148b61266fc14",
+  "profile": {
+    "sample_rate": 24000,
+    "channels": 1,
+    "codebooks": 4,
+    "entries_per_codebook": 1024,
+    "bandwidths_kbps": {
+      "1.5": 2,
+      "3.0": 4
+    }
+  },
   "artifacts": {
     "ecng-24khz-encoder-f32.bin": {
       "bytes": 31791080,
-      "sha256": "cb3b155ce06fc90f7e44de3451dce229b927530d29b023d73e5be21f448dfb63"
-    },
-    "ecng-24khz-decoder-int8.bin": {
-      "bytes": 10049239,
-      "sha256": "bd3b9b2a9105ddaf46fc592a4733b91b8859fba84360d330b673780390a23549"
-    },
-    "ecng-24khz-joint-state.pt": {
-      "bytes": 65856437,
-      "sha256": "cf393c911ff5c12924779adbf048b27e2c641d1b042eff1a4bc60588a5712a2d"
+      "sha256": "6073d408c32389db1761e87fe7818dc8541d7028645f7c2845655d7c227a65c8",
+      "precision": "FP32"
     },
     "ecng-24khz-decoder-fp32.bin": {
       "bytes": 33981819,
-      "sha256": "81694ff2f7c219fd417de8730b15158121c38b91b46ab4b5bff4a94d9e9c3260"
+      "sha256": "90519de8f4e80c7f1d957c51893b5ead14bdbfedd06e58556c7c0653189fbd69",
+      "precision": "FP32"
     },
     "ecng-24khz-decoder-fp16.bin": {
       "bytes": 16992703,
-      "sha256": "77c56a4e2f7b3b7b2eacbc6cfc4c3286726d387444ed21972e7190cde5355918"
+      "sha256": "8921cd95a871eea1bdd1336daa674bb5899c58f5583fbe0c0712210c93b008ff",
+      "precision": "FP16"
+    },
+    "ecng-24khz-decoder-int8.bin": {
+      "bytes": 10049239,
+      "sha256": "f881e6845f85aff2e5793e049f68ffdfe4a1fc37fc3cb6d133c819449dee012b",
+      "precision": "INT8"
     },
     "ecng-24khz-decoder-int4.bin": {
       "bytes": 6081367,
-      "sha256": "b877537e52cb0145c3e28fb6406d5b8dd33481155b3acc0eef87e4b3f9c9dd0f",
-      "derived_from": "ecng-24khz-decoder-fp32.bin using export_ecng.py int4 groupwise symmetric quantization"
+      "sha256": "d6791817bbfbb1617ba7565c60fdcc2d6bf048afc3266b0333fa495614ceda57",
+      "precision": "INT4",
+      "derived_from": "ECNG best checkpoint 1,870,000 using export_ecng.py groupwise symmetric quantization"
     }
   }
 }
